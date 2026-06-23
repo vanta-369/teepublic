@@ -1,5 +1,6 @@
 import type { QueueBatch, QueueItem } from "@teepublic/shared";
 import { QueueStore, ImageStore } from "../services/queueStore";
+import { buildBatchExport, applyBatchImport } from "../services/batchTransfer";
 
 function $(id: string) { return document.getElementById(id) as HTMLElement; }
 
@@ -106,6 +107,56 @@ async function init() {
       await chrome.runtime.sendMessage({ type: "QUEUE_CLEAR" });
     }
   };
+
+  $("btn-export").onclick = exportBatch;
+  $("btn-import").onclick = () => ($("file-import") as HTMLInputElement).click();
+  ($("file-import") as HTMLInputElement).onchange = importBatch;
+}
+
+/** Save the whole batch (listings + colors + images) to a JSON file the user
+ *  can carry to another Chrome profile. */
+async function exportBatch(): Promise<void> {
+  const btn = $("btn-export") as HTMLButtonElement;
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Exporting…";
+  try {
+    const data = await buildBatchExport();
+    const blob = new Blob([JSON.stringify(data)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    a.href = url;
+    a.download = `teepublic-batch-${data.batch.items.length}-designs-${stamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    alert(e instanceof Error ? e.message : "Export failed.");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
+/** Load a batch exported from another profile into this profile's queue. */
+async function importBatch(ev: Event): Promise<void> {
+  const input = ev.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = ""; // allow re-importing the same file later
+  if (!file) return;
+
+  if (!confirm(`Import "${file.name}"? This replaces the current queue.`)) return;
+
+  try {
+    const data = JSON.parse(await file.text());
+    const { items, images } = await applyBatchImport(data);
+    render(await QueueStore.get());
+    alert(`Imported ${items} design(s) (${images} image(s)). Review your selection, then press Start.`);
+  } catch (e) {
+    alert(e instanceof Error ? `Import failed: ${e.message}` : "Import failed.");
+  }
 }
 
 init();
