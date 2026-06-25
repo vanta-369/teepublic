@@ -80,13 +80,16 @@ class AutomationEngine {
     }
   }
 
-  /** BULK: TeePublic opens each design on its OWN /designs/<id>/edit page and
-   *  auto-advances after each publish. So the engine drives the navigation:
-   *    1. bulk_uploader → dispatch all files + GET STARTED (content script)
-   *    2. wait for design 1's /designs/<id>/edit page
-   *    3. fill + publish each design in upload order; publishing navigates to
-   *       the next /edit page — wait for the URL to change, then repeat.
-   *  The content script reports each design's status via ITEM_STATUS. */
+  /** BULK: TeePublic's OFFICIAL in-place flow. After GET STARTED, designs are
+   *  edited one at a time on the SAME /designs/bulk_uploader page, advanced with
+   *  the "NEXT DESIGN" button and published together with "PUBLISH ALL".
+   *    1. bulk_uploader → dispatch all files (content replies with valid ids,
+   *       then clicks GET STARTED).
+   *    2. let the editing view render.
+   *    3. one AUTOMATION_BULK_RUN drives fill → NEXT DESIGN → … → PUBLISH ALL;
+   *       the content script reports each design's status via ITEM_STATUS, so the
+   *       results survive PUBLISH ALL's navigation (and worker suspension).
+   *  Single mode is untouched. */
   private async runBulk(items: QueueItem[]) {
     for (const it of items) {
       await QueueStore.setItemStatus(it.id, "running", { attempts: it.attempts + 1, lastError: undefined });
@@ -98,8 +101,8 @@ class AutomationEngine {
       for (const it of items) imageDataUrls.push(await imageDataUrlFor(it));
       await ensureContentScriptReady(tabId);
 
-      // 1. Dispatch + GET STARTED. The content script replies with the valid ids
-      //    (in upload order), then clicks GET STARTED (which navigates away).
+      // 1. Dispatch all files. The content script replies with the valid ids (in
+      //    upload order), then clicks GET STARTED.
       const disp = await sendToTab<{ ok: boolean; validIds?: string[]; error?: string }>(
         tabId, { type: "AUTOMATION_BULK_DISPATCH", items, imageDataUrls });
       const validIds = disp?.validIds ?? [];
@@ -110,33 +113,23 @@ class AutomationEngine {
       }
       const ordered = validIds.map((id) => items.find((i) => i.id === id)!).filter(Boolean);
 
-      // 2. Wait for design 1's edit page.
-      if (!(await waitForTabUrl(tabId, /\/designs\/\d+\/edit/, 90_000))) {
-        throw new Error("GET STARTED did not open a /designs/<id>/edit page");
+      // 2. Let the editing view render after GET STARTED. It stays on the
+      //    bulk_uploader page (in place), but re-ensure the script in case the
+      //    DOM was swapped out.
+      await new Promise((r) => setTimeout(r, 3_000));
+      await ensureContentScriptReady(tabId);
+
+      // 3. Drive the whole in-place edit → NEXT DESIGN → PUBLISH ALL loop. This
+      //    one call spans the batch; the content script reports each design's
+      //    status itself, so a dropped response (PUBLISH ALL navigation) or a
+      //    suspended worker still leaves correct statuses behind.
+      try {
+        await sendToTab(tabId, { type: "AUTOMATION_BULK_RUN", items: ordered });
+      } catch {
+        // PUBLISH ALL navigation can close the message port — ignore.
       }
 
-      // 3. Fill + publish each design; publishing auto-advances to the next /edit.
-      for (let k = 0; k < ordered.length; k++) {
-        const item = ordered[k];
-        await ensureContentScriptReady(tabId);
-        const beforeUrl = (await chrome.tabs.get(tabId).catch(() => null))?.url ?? "";
-        try {
-          await sendToTab(tabId, { type: "AUTOMATION_FILL_PUBLISH_DRAFT", item });
-        } catch {
-          // Publishing navigates to the next /edit and can drop the response —
-          // the content script already fired ITEM_STATUS.
-        }
-        // Wait for TeePublic to advance (URL changes off this edit page), unless
-        // this was the last design.
-        if (k < ordered.length - 1) {
-          await waitForTabUrlChange(tabId, beforeUrl, 90_000);
-        } else {
-          await new Promise((r) => setTimeout(r, 4_000));
-        }
-        await humanDelay(800, 1_500);
-      }
-
-      await new Promise((r) => setTimeout(r, 2_000));
+      await new Promise((r) => setTimeout(r, 2_500));
       await this.reconcileBulk(items);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
