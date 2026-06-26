@@ -710,11 +710,22 @@ async function maybeDriveBulkEditPage(): Promise<void> {
   }
 
   const item = state.items[state.index];
+  const isFirst = state.index === 0;
   log(`bulk: editing ${state.index + 1}/${state.items.length} (id=${editId}) ← ${item.metadata.filename}`);
 
   // Claim this id + advance the index NOW, so if the publish navigation kills us
   // mid-flight the NEXT /edit page picks up the following item (never re-fills).
   await BulkStateStore.patch({ lastDesignId: editId, index: state.index + 1 });
+
+  // After GET STARTED, give TeePublic ~30s to finish loading the first edit page
+  // before we touch anything, then resume.
+  if (isFirst) {
+    const wait = 30_000 - (Date.now() - state.startedAt);
+    if (wait > 0) {
+      log(`bulk: waiting ${Math.round(wait / 1000)}s after Get Started before filling…`);
+      await sleep(wait);
+    }
+  }
 
   // fillAndPublishDraft fires ITEM_STATUS and clicks Publish (or Skip) — both
   // navigate to the next design's /edit page, where this driver runs again.
