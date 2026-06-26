@@ -143,18 +143,28 @@ export const BULK = {
     'input[type="file"]',
   ],
   getStarted: [
+    // TeePublic's "Get Started" is a <div>, NOT a <button>/<a>:
+    //   <div class="m-bulk-uploader__submit-button btn btn--green btn--big
+    //               jsBulkUploaderSubmit">Get Started</div>
+    // Match the class directly so findClickable's querySelector returns exactly
+    // this div and fullClick fires its own JS handler.
+    ".jsBulkUploaderSubmit",
+    ".m-bulk-uploader__submit-button",
+    // Text fallbacks — findClickable's text search also scans <div>/<span>.
     'button:contains("GET STARTED")',
-    'button:contains("Get Started")',
-    'button:contains("Get started")',
     'a:contains("GET STARTED")',
-    'a:contains("Get Started")',
+    'div:contains("Get Started")',
+    'div:contains("GET STARTED")',
   ],
   nextDesign: [
+    // Next Design is likewise a styled <div>, not a real button.
+    ".jsBulkUploaderNextDesign",
     'button:contains("NEXT DESIGN")',
     'button:contains("Next Design")',
-    'button:contains("Next design")',
     'a:contains("NEXT DESIGN")',
     'a:contains("Next Design")',
+    'div:contains("Next Design")',
+    'div:contains("NEXT DESIGN")',
   ],
   // Drops a design from the bulk batch (used to discard leftovers that aren't
   // part of this run, so we never publish them with the wrong/empty listing).
