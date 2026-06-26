@@ -89,7 +89,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       const result = await runBulkDispatch(message.items, message.imageDataUrls);
       sendResponse(result);
       if (result.ok && result.validIds.length > 0) {
-        await sleep(500);
+        // runBulkDispatch already waited for the upload to FINISH; a short extra
+        // settle keeps us clear of the "You must upload images to continue" alert.
+        await sleep(1_500);
         await clickGetStarted();
       }
       return;
@@ -578,18 +580,32 @@ async function runBulkDispatch(
     const files = valid.map((v, i) =>
       dataUrlToFile(v.dataUrl, v.item.metadata.filename || `design_${i + 1}.png`, v.item.imageMime || "image/png"));
     await setFileInputMultiple(input, files);
-    log(`dispatched ${files.length} files — waiting for GET STARTED…`);
+    log(`dispatched ${files.length} files — waiting for upload to FINISH…`);
 
-    // Wait for GET STARTED to appear (tiles finished processing). Don't click
-    // yet — the handler clicks it after this response is sent.
-    try {
-      await findClickable([...BULK.getStarted], 60_000);
-    } catch {
-      const err = "no designs passed TeePublic's size check (GET STARTED never appeared)";
+    // CRITICAL: the GET STARTED div (.jsBulkUploaderSubmit) is in the DOM the
+    // whole time, so we must NOT click it while the files are still uploading
+    // ("UPLOADING… 4%") — TeePublic then alerts "You must upload images to
+    // continue." Wait for the upload to actually complete (the "click GET
+    // STARTED to create your products" banner, or the UPLOADING indicator to
+    // disappear) before reporting ready. The handler clicks GET STARTED only
+    // after this responds.
+    const done = await waitForBulkUploadComplete(180_000);
+    if (!done) {
+      const err = "bulk upload did not finish in time (still processing files)";
       log(`bulk aborted: ${err}`);
       for (const v of valid) fireItemStatus(v.item.id, "failed", undefined, err);
       return { ok: false, error: err, validIds: [] };
     }
+    // Confirm the GET STARTED control is actually present before reporting ready.
+    try {
+      await findClickable([...BULK.getStarted], 10_000);
+    } catch {
+      const err = "GET STARTED control not found after upload finished";
+      log(`bulk aborted: ${err}`);
+      for (const v of valid) fireItemStatus(v.item.id, "failed", undefined, err);
+      return { ok: false, error: err, validIds: [] };
+    }
+    log(`bulk upload finished — GET STARTED ready`);
     return { ok: true, validIds: valid.map((v) => v.item.id) };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -608,6 +624,33 @@ async function clickGetStarted(): Promise<void> {
   } catch (e) {
     log(`GET STARTED click failed: ${(e as Error).message}`);
   }
+}
+
+/** Wait until the bulk uploader finishes processing the dropped files, so we
+ *  never click GET STARTED mid-upload (which makes TeePublic alert "You must
+ *  upload images to continue."). Done when either:
+ *    • the success banner "…click GET STARTED to create your products" shows, or
+ *    • the "UPLOADING… N%" indicator has appeared and then disappeared.
+ *  Returns false on timeout. */
+async function waitForBulkUploadComplete(timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  let sawUploading = false;
+  let lastPct = "";
+  while (Date.now() < deadline) {
+    const body = (document.body.textContent ?? "").toLowerCase();
+    // Definitive "ready" banner from TeePublic once all files are processed.
+    if (/get started to create your products/.test(body)) return true;
+    // Track the UPLOADING… indicator: must appear then clear before we proceed.
+    const pct = body.match(/uploading[.\s…]*?(\d+)%/);
+    if (/uploading/.test(body)) {
+      sawUploading = true;
+      if (pct && pct[1] !== lastPct) { lastPct = pct[1]; log(`bulk upload progress: ${pct[1]}%`); }
+    } else if (sawUploading) {
+      return true; // uploading indicator cleared → processing finished
+    }
+    await sleep(500);
+  }
+  return false;
 }
 
 /** On a /designs/<id>/edit bulk page: fill listing + colors then publish (which
