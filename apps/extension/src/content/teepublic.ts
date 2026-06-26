@@ -631,7 +631,9 @@ async function waitForBulkProcessingDone(expectedTiles: number, timeoutMs: numbe
   let lastPct = "";
   while (Date.now() < deadline) {
     const body = (document.body.textContent ?? "").toLowerCase();
-    const uploading = /uploading/.test(body);
+    // Only the progress indicator counts as "uploading" — NOT the permanent
+    // "Need help uploading?" link, which would otherwise block us forever.
+    const uploading = /uploading[.\s…]*\d+\s*%/.test(body);
     const processing = /waiting for your designs to process/.test(body);
     // The success banner appears only once every design has finished processing.
     const banner = /create your products/.test(body) || /you can add more files/.test(body);
