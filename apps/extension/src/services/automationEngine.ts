@@ -81,17 +81,16 @@ class AutomationEngine {
     }
   }
 
-  /** BULK: dispatch all files on /designs/bulk_uploader → GET STARTED → fill
-   *  each design's listing, click NEXT DESIGN between them, and PUBLISH ALL on
-   *  the last.
+  /** BULK: dispatch all files on /designs/bulk_uploader → GET STARTED → fill +
+   *  Publish each design on its own /designs/<id>/edit page.
    *    1. dispatch all files (content waits for upload+processing to FINISH, then
    *       clicks GET STARTED).
    *    2. wait for design 1's /designs/<id>/edit page (abort if it never opens).
-   *    3. for each design (in upload order): fill it, then NEXT DESIGN — which
-   *       navigates to the next design's /edit page — or PUBLISH ALL on the last.
-   *       Wait for a NEW /edit id before filling the next. The content script
-   *       reports each design's status via ITEM_STATUS, so results survive the
-   *       navigation (and worker suspension).
+   *    3. for each design (in upload order): fill it, click Publish — TeePublic
+   *       auto-loads the next design's /edit page — wait for a NEW /edit id,
+   *       repeat. Broken designs use the skip?id=<id> link to advance. The
+   *       content script reports each design's status via ITEM_STATUS, so results
+   *       survive the navigation (and worker suspension).
    *  Single mode is untouched. */
   private async runBulk(items: QueueItem[]) {
     for (const it of items) {
@@ -123,27 +122,26 @@ class AutomationEngine {
         throw new Error("bulk: Get Started did not open an edit page (designs may have been rejected / still processing) — aborting");
       }
 
-      // 3. Fill each design on its /edit page, then NEXT DESIGN → … → PUBLISH
-      //    ALL on the last. NEXT DESIGN navigates to the next design's /edit
-      //    page, so before filling design k>0 wait for a /edit page with a NEW
-      //    id. The content script reports each design's status via ITEM_STATUS,
-      //    so a dropped response (navigation) still leaves correct statuses.
+      // 3. Fill + Publish each design on its /edit page. Publishing auto-loads
+      //    the NEXT design's /edit page, so before filling design k>0 wait for a
+      //    /edit page with a NEW id (skipping any /t-shirt/<slug> interstitial).
+      //    The content script reports each design's status via ITEM_STATUS, so a
+      //    dropped response (the publish navigation) still leaves correct statuses.
       for (let k = 0; k < ordered.length; k++) {
         if (k > 0) {
           const nextId = await waitForEditPage(tabId, prevEditId, 60_000);
           if (!nextId) {
-            BulkLogStore.append(`bulk: no further edit page after design ${k} — stopping`);
+            BulkLogStore.append(`bulk: no further edit page after design ${k} — finishing`);
             break;
           }
           prevEditId = nextId;
         }
         await ensureContentScriptReady(tabId);
-        const isLast = k === ordered.length - 1;
         try {
-          await sendToTab(tabId, { type: "AUTOMATION_BULK_FILL_ADVANCE", item: ordered[k], isLast });
+          await sendToTab(tabId, { type: "AUTOMATION_FILL_PUBLISH_DRAFT", item: ordered[k] });
         } catch {
-          // NEXT DESIGN / PUBLISH ALL navigation can drop the response — the
-          // content script already fired ITEM_STATUS.
+          // Publishing navigates and can drop the response — the content script
+          // already fired ITEM_STATUS.
         }
         await humanDelay(800, 1_500);
       }

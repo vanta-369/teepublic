@@ -96,11 +96,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return;
     }
-    if (message?.type === "AUTOMATION_BULK_FILL_ADVANCE") {
-      // On a /designs/<id>/edit page: fill this one design, then click
-      // NEXT DESIGN (or PUBLISH ALL when isLast). The engine waits for the next
-      // /edit page before sending the next one.
-      const result = await fillAndAdvance(message.item, message.isLast === true);
+    if (message?.type === "AUTOMATION_FILL_PUBLISH_DRAFT") {
+      // On a /designs/<id>/edit page: fill this one design and click Publish.
+      // Publishing auto-advances TeePublic to the next design's /edit page; the
+      // engine waits for that new /edit URL before sending the next one.
+      const result = await fillAndPublishDraft(message.item);
       return sendResponse(result);
     }
     return sendResponse({ ok: false, error: "unknown message" });
@@ -686,20 +686,21 @@ function countBulkTiles(): number {
  *  The engine calls this once per design (it waits for each /edit page first).
  *  Reuses runUpload's fill/colors/BLOCKING via skipUpload+skipPublish — single
  *  mode is untouched. */
-async function fillAndAdvance(item: QueueItem, isLast: boolean): Promise<{ ok: boolean; error?: string }> {
+async function fillAndPublishDraft(item: QueueItem): Promise<{ ok: boolean; error?: string }> {
   lastFiredItemId = null; // per-design isolation (runUpload makes its own filled set)
-  log(`── bulk design (${isLast ? "LAST → PUBLISH ALL" : "→ NEXT DESIGN"}): ${item.metadata.filename} (${location.pathname}) ──`);
+  log(`── bulk design: ${item.metadata.filename} (${location.pathname}) ──`);
 
   const state = await waitForListingForm(45_000);
   if (state !== "ready") {
     const reason = state === "rejected" ? "rejected by TeePublic (size/format)" : "listing form did not load";
-    log(`bulk: ${item.metadata.filename} ${reason} — Skip & Cancel`);
+    log(`bulk: ${item.metadata.filename} ${reason} — Skip & Cancel This Design`);
     fireItemStatus(item.id, "failed", undefined, reason);
-    await clickFirst([...BULK.skipDesign]);
+    await clickSkipThisDesign();
     return { ok: false, error: reason };
   }
 
-  // Fill listing + colors + products only (no per-design publish).
+  // Fill listing + colors + products only (artwork already uploaded). skipPublish
+  // here just means runUpload returns after the BLOCKING check — we publish below.
   let fill: { ok: boolean; error?: string };
   try {
     fill = await runUpload(item, "", true, true); // skipUpload + skipPublish
@@ -707,25 +708,25 @@ async function fillAndAdvance(item: QueueItem, isLast: boolean): Promise<{ ok: b
     fill = { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
   if (!fill.ok) {
-    log(`bulk: ${item.metadata.filename} fill FAILED: ${fill.error} — Skip & Cancel`);
+    log(`bulk: ${item.metadata.filename} fill FAILED: ${fill.error} — Skip & Cancel This Design`);
     fireItemStatus(item.id, "failed", undefined, fill.error);
-    await clickFirst([...BULK.skipDesign]);
+    await clickSkipThisDesign();
     return { ok: false, error: fill.error };
   }
   log(`bulk: ${item.metadata.filename} filled, colors ok`);
 
-  // Mark succeeded BEFORE the navigating click — NEXT DESIGN / PUBLISH ALL both
-  // navigate and destroy this content script's sendResponse callback.
+  await acceptBulkTerms();
+  await sleep(300);
+  // Mark succeeded BEFORE clicking Publish — publishing navigates to the NEXT
+  // design's /designs/<id>/edit page and destroys this content script.
   fireItemStatus(item.id, "succeeded");
-
-  if (isLast) {
-    await acceptBulkTerms();
-    await sleep(300);
-    const ok = await clickPublishAll(30_000);
-    log(ok ? "bulk: PUBLISH ALL confirmed" : "bulk: PUBLISH ALL click sent (transition not confirmed)");
-  } else {
-    const ok = await clickNextDesign(25_000);
-    log(ok ? "bulk: advanced to next design" : "bulk: NEXT DESIGN did not confirm advance");
+  try {
+    const publish = await findClickable([...TP.publishButton], 15_000);
+    await fullClick(publish);
+    log(`bulk: published ${item.metadata.filename} — TeePublic will load the next design`);
+  } catch (e) {
+    log(`bulk: publish click failed: ${(e as Error).message}`);
+    return { ok: false, error: `publish click failed: ${(e as Error).message}` };
   }
   return { ok: true };
 }
@@ -755,64 +756,23 @@ async function waitForListingForm(timeoutMs: number): Promise<"ready" | "rejecte
   return "timeout";
 }
 
-/** Click the green NEXT DESIGN control and wait until the editor advances to the
- *  next design (the "Currently Editing Design X of N" counter increments and/or
- *  the title field resets). Returns false if it can't confirm an advance. */
-async function clickNextDesign(timeoutMs: number): Promise<boolean> {
-  const before = readBulkDesignCounter();
-  const beforeTitle = currentTitleValue();
-  const btn = await findClickable([...BULK.nextDesign], 8_000).catch(() => null);
-  if (!btn) { log("bulk: NEXT DESIGN control not found"); return false; }
-  await fullClick(btn);
-  log("bulk: clicked NEXT DESIGN");
-
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    await sleep(400);
-    const now = readBulkDesignCounter();
-    if (before && now && now.current > before.current) return true; // counter advanced
-    const title = currentTitleValue();
-    if (title !== beforeTitle) return true;                          // form reset to next design
+/** Skip the CURRENT bulk design and advance to the next. TeePublic's link is
+ *  <a href="/designs/bulk_uploader/skip?id=<thisDesignId>">Skip & Cancel This
+ *  Design</a>; clicking it navigates to the next design's /edit page. We never
+ *  want the id=all "Cancel Entire Bulk Upload" link. */
+async function clickSkipThisDesign(): Promise<boolean> {
+  // Prefer the per-design skip link scoped to THIS page's design id.
+  const id = (location.href.match(/\/designs\/(\d+)\/edit/) || [])[1];
+  if (id) {
+    const a = document.querySelector<HTMLAnchorElement>(`a[href*="/designs/bulk_uploader/skip?id=${id}"]`);
+    if (a) { await fullClick(a); log(`bulk: clicked Skip & Cancel This Design (id=${id})`); return true; }
   }
-  return false;
-}
-
-/** Click the green PUBLISH ALL control and best-effort confirm the batch
- *  published (navigation away from the bulk uploader, or a success indicator). */
-async function clickPublishAll(timeoutMs: number): Promise<boolean> {
-  const beforeUrl = location.href;
-  const btn = await findClickable([...BULK.publishAll, ...TP.publishButton], 12_000).catch(() => null);
-  if (!btn) { log("bulk: PUBLISH ALL control not found"); return false; }
-  await fullClick(btn);
-  log("bulk: clicked PUBLISH ALL");
-
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    await sleep(400);
-    if (location.href !== beforeUrl && !/bulk_uploader/i.test(location.href)) return true;
-    if (document.querySelector(TP.successIndicator.join(", "))) return true;
-  }
-  return false;
-}
-
-/** Read TeePublic's "Currently Editing Design X of N" progress label. */
-function readBulkDesignCounter(): { current: number; total: number } | null {
-  const rx = /currently editing design\s+(\d+)\s+of\s+(\d+)/i;
-  for (const el of Array.from(document.querySelectorAll<HTMLElement>("body *"))) {
-    if (el.children.length !== 0) continue; // leaf nodes only
-    const m = rx.exec(el.textContent ?? "");
-    if (m) return { current: parseInt(m[1], 10), total: parseInt(m[2], 10) };
-  }
-  const m = rx.exec(document.body.textContent ?? "");
-  return m ? { current: parseInt(m[1], 10), total: parseInt(m[2], 10) } : null;
-}
-
-/** Current value of the design-title input (used to detect the form advancing). */
-function currentTitleValue(): string {
-  const el = document.querySelector<HTMLInputElement>(
-    'input[name="design[design_title]"], input[name="title"], input[placeholder="Title"], input[placeholder*="title" i]'
+  // Fallbacks: any per-design skip link (never id=all), then text.
+  const generic = document.querySelector<HTMLAnchorElement>(
+    'a[href*="/designs/bulk_uploader/skip?id="]:not([href*="id=all"])'
   );
-  return el?.value ?? "";
+  if (generic) { await fullClick(generic); log("bulk: clicked Skip & Cancel This Design (generic)"); return true; }
+  return await clickFirst([...BULK.skipDesign]);
 }
 
 /** Tick the Terms & Conditions checkbox once before Publish All. */

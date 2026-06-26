@@ -166,13 +166,14 @@ export const BULK = {
     'div:contains("Next Design")',
     'div:contains("NEXT DESIGN")',
   ],
-  // Drops a design from the bulk batch (used to discard leftovers that aren't
-  // part of this run, so we never publish them with the wrong/empty listing).
+  // Skips the CURRENT bulk design and advances to the next. TeePublic's link is
+  //   <a href="/designs/bulk_uploader/skip?id=<designId>">Skip & Cancel This Design</a>
+  // The id=all variant cancels the ENTIRE bulk upload — never match that here.
   skipDesign: [
+    'a[href*="/designs/bulk_uploader/skip?id="]:not([href*="id=all"])',
     'a:contains("Skip & Cancel This Design")',
     'button:contains("Skip & Cancel This Design")',
     'a:contains("Skip & Cancel")',
-    'a:contains("Skip")',
   ],
   // The final bulk publish button (publishes the whole batch).
   publishAll: [
