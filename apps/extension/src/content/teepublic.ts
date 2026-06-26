@@ -96,11 +96,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return;
     }
-    if (message?.type === "AUTOMATION_BULK_RUN") {
-      // After GET STARTED: wait through "Waiting for your designs to process",
-      // then fill each design → NEXT DESIGN → … → PUBLISH ALL. One call for the
-      // whole batch; each design's status is reported via ITEM_STATUS.
-      const result = await runBulkEditAndPublishAll(message.items);
+    if (message?.type === "AUTOMATION_BULK_FILL_ADVANCE") {
+      // On a /designs/<id>/edit page: fill this one design, then click
+      // NEXT DESIGN (or PUBLISH ALL when isLast). The engine waits for the next
+      // /edit page before sending the next one.
+      const result = await fillAndAdvance(message.item, message.isLast === true);
       return sendResponse(result);
     }
     return sendResponse({ ok: false, error: "unknown message" });
@@ -581,32 +581,21 @@ async function runBulkDispatch(
     const files = valid.map((v, i) =>
       dataUrlToFile(v.dataUrl, v.item.metadata.filename || `design_${i + 1}.png`, v.item.imageMime || "image/png"));
     await setFileInputMultiple(input, files);
-    log(`dispatched ${files.length} files — waiting for upload to FINISH…`);
+    log(`dispatched ${files.length} files — waiting for TeePublic to PROCESS them…`);
 
     // CRITICAL: the GET STARTED div (.jsBulkUploaderSubmit) is in the DOM the
-    // whole time, so we must NOT click it while the files are still uploading
-    // ("UPLOADING… 4%") — TeePublic then alerts "You must upload images to
-    // continue." Wait for the upload to actually complete (the "click GET
-    // STARTED to create your products" banner, or the UPLOADING indicator to
-    // disappear) before reporting ready. The handler clicks GET STARTED only
-    // after this responds.
-    const done = await waitForBulkUploadComplete(180_000);
+    // whole time. Clicking it while files are still UPLOADING triggers "You must
+    // upload images to continue.", and clicking it while "Waiting for your
+    // designs to process" is shown does nothing (the page stays on
+    // /designs/bulk_uploader). So wait until BOTH uploading and processing are
+    // done and the tiles + Get Started button are present before reporting ready.
+    const done = await waitForBulkProcessingDone(120_000);
     if (!done) {
-      const err = "bulk upload did not finish in time (still processing files)";
+      const err = "bulk processing did not finish in time (designs still processing)";
       log(`bulk aborted: ${err}`);
       for (const v of valid) fireItemStatus(v.item.id, "failed", undefined, err);
       return { ok: false, error: err, validIds: [] };
     }
-    // Confirm the GET STARTED control is actually present before reporting ready.
-    try {
-      await findClickable([...BULK.getStarted], 10_000);
-    } catch {
-      const err = "GET STARTED control not found after upload finished";
-      log(`bulk aborted: ${err}`);
-      for (const v of valid) fireItemStatus(v.item.id, "failed", undefined, err);
-      return { ok: false, error: err, validIds: [] };
-    }
-    log(`bulk upload finished — GET STARTED ready`);
     return { ok: true, validIds: valid.map((v) => v.item.id) };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -627,120 +616,111 @@ async function clickGetStarted(): Promise<void> {
   }
 }
 
-/** Wait until the bulk uploader finishes processing the dropped files, so we
- *  never click GET STARTED mid-upload (which makes TeePublic alert "You must
- *  upload images to continue."). Done when either:
- *    • the success banner "…click GET STARTED to create your products" shows, or
- *    • the "UPLOADING… N%" indicator has appeared and then disappeared.
- *  Returns false on timeout. */
-async function waitForBulkUploadComplete(timeoutMs: number): Promise<boolean> {
+/** Wait until TeePublic finishes UPLOADING and PROCESSING the dropped files, so
+ *  we never click GET STARTED too early. Two phases happen on the bulk_uploader
+ *  page: "UPLOADING… N%", then "Waiting for your designs to process". Done only
+ *  when both are gone AND the Get Started button (+ tiles) are present. Returns
+ *  false on timeout. */
+async function waitForBulkProcessingDone(timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
-  let sawUploading = false;
+  let sawWork = false;          // upload/processing actually started
+  let lastProcLog = 0;
   let lastPct = "";
   while (Date.now() < deadline) {
     const body = (document.body.textContent ?? "").toLowerCase();
-    // Definitive "ready" banner from TeePublic once all files are processed.
-    if (/get started to create your products/.test(body)) return true;
-    // Track the UPLOADING… indicator: must appear then clear before we proceed.
-    const pct = body.match(/uploading[.\s…]*?(\d+)%/);
-    if (/uploading/.test(body)) {
-      sawUploading = true;
+    const uploading = /uploading/.test(body);
+    const processing = /waiting for your designs to process/.test(body);
+
+    if (uploading) {
+      sawWork = true;
+      const pct = body.match(/uploading[.\s…]*?(\d+)%/);
       if (pct && pct[1] !== lastPct) { lastPct = pct[1]; log(`bulk upload progress: ${pct[1]}%`); }
-    } else if (sawUploading) {
-      return true; // uploading indicator cleared → processing finished
+    }
+    if (processing) {
+      sawWork = true;
+      if (Date.now() - lastProcLog > 4_000) { log("bulk: designs still processing… waiting"); lastProcLog = Date.now(); }
+    }
+
+    if (!uploading && !processing) {
+      // Both phases finished — require Get Started present before proceeding.
+      const getStarted = !!document.querySelector(".jsBulkUploaderSubmit") ||
+                         findByVisibleText("div", "Get Started") != null;
+      if (getStarted && sawWork) {
+        const tiles = countBulkTiles();
+        log(`bulk: processing done, ${tiles} tile(s), clicking Get Started once ready`);
+        return true;
+      }
     }
     await sleep(500);
   }
   return false;
 }
 
-/** Drive TeePublic's bulk editing after GET STARTED. Flow per the live UI:
- *    GET STARTED → "Waiting for your designs to process" → the listing/edit form
- *    appears for design 1 → fill it → click NEXT DESIGN → fill design 2 → … →
- *    on the LAST design, accept terms + click PUBLISH ALL (publishes the batch).
- *  Designs are bound to queue items by upload order. Each design's status is
- *  reported via ITEM_STATUS (fired before PUBLISH ALL so it survives the
- *  navigation). Reuses runUpload's fill/colors/BLOCKING via skipUpload+skipPublish
- *  — single mode is untouched. */
-async function runBulkEditAndPublishAll(
-  items: QueueItem[],
-): Promise<{ ok: boolean; succeeded: string[]; failed: string[]; error?: string }> {
-  log(`──── BULK edit: ${items.length} design(s) — fill → NEXT DESIGN → PUBLISH ALL ────`);
-  const succeeded: string[] = [];
-  const failed: string[] = [];
+/** Best-effort count of uploaded-design preview tiles in the bulk uploader. */
+function countBulkTiles(): number {
+  const sels = [
+    ".jsBulkUploaderDesign",
+    '[class*="bulk-uploader__design" i]',
+    '[class*="bulk_uploader_design" i]',
+    '[class*="uploaded-design" i]',
+  ];
+  for (const s of sels) {
+    const n = document.querySelectorAll(s).length;
+    if (n > 0) return n;
+  }
+  return document.querySelectorAll('img[src^="blob:"], img[src^="data:image"], img[src*="amazonaws"], img[src*="cloudfront"]').length;
+}
 
-  for (let k = 0; k < items.length; k++) {
-    const item = items[k];
-    const isLast = k === items.length - 1;
-    lastFiredItemId = null; // per-design isolation (runUpload makes its own filled set)
+/** Fill ONE design on its /designs/<id>/edit page, then advance:
+ *    • fill listing + colors + products (no artwork upload — already done),
+ *    • mark the item succeeded (before the navigating click, so it survives),
+ *    • if isLast → accept terms + click PUBLISH ALL (publishes the batch),
+ *      else  → click NEXT DESIGN (navigates to the next design's /edit page).
+ *  The engine calls this once per design (it waits for each /edit page first).
+ *  Reuses runUpload's fill/colors/BLOCKING via skipUpload+skipPublish — single
+ *  mode is untouched. */
+async function fillAndAdvance(item: QueueItem, isLast: boolean): Promise<{ ok: boolean; error?: string }> {
+  lastFiredItemId = null; // per-design isolation (runUpload makes its own filled set)
+  log(`── bulk design (${isLast ? "LAST → PUBLISH ALL" : "→ NEXT DESIGN"}): ${item.metadata.filename} (${location.pathname}) ──`);
 
-    // Wait for THIS design's listing form. The first one waits through the
-    // "Waiting for your designs to process" page, so give it longer.
-    const state = await waitForListingForm(k === 0 ? 150_000 : 60_000);
-    if (state === "rejected") {
-      log(`bulk: design ${k + 1}/${items.length} rejected by TeePublic — Skip & Cancel`);
-      fireItemStatus(item.id, "failed", undefined, "rejected by TeePublic (size/format)");
-      failed.push(item.id);
-      await clickFirst([...BULK.skipDesign]);
-      await sleep(1_500);
-      continue;
-    }
-    if (state === "timeout") {
-      log(`bulk: design ${k + 1}/${items.length} listing form never appeared — Skip & Cancel`);
-      fireItemStatus(item.id, "failed", undefined, "listing form did not load");
-      failed.push(item.id);
-      await clickFirst([...BULK.skipDesign]);
-      await sleep(1_500);
-      continue;
-    }
-
-    // Fill listing + colors + products only (artwork already uploaded; no
-    // per-design publish — PUBLISH ALL does it once at the end).
-    let fill: { ok: boolean; error?: string };
-    try {
-      fill = await runUpload(item, "", true, true); // skipUpload + skipPublish
-    } catch (e) {
-      fill = { ok: false, error: e instanceof Error ? e.message : String(e) };
-    }
-    if (!fill.ok) {
-      log(`bulk: design ${k + 1}/${items.length} (${item.metadata.filename}) fill FAILED: ${fill.error} — Skip & Cancel`);
-      fireItemStatus(item.id, "failed", undefined, fill.error);
-      failed.push(item.id);
-      await clickFirst([...BULK.skipDesign]);
-      await sleep(1_500);
-      continue;
-    }
-    log(`bulk: design ${k + 1}/${items.length} (${item.metadata.filename}) filled, colors ok`);
-    succeeded.push(item.id);
-
-    // Advance to the next design — unless this was the last (then PUBLISH ALL).
-    if (!isLast) {
-      const advanced = await clickNextDesign(25_000);
-      if (!advanced) {
-        log(`bulk: NEXT DESIGN did not advance after design ${k + 1} — publishing what's filled`);
-        break;
-      }
-    }
+  const state = await waitForListingForm(45_000);
+  if (state !== "ready") {
+    const reason = state === "rejected" ? "rejected by TeePublic (size/format)" : "listing form did not load";
+    log(`bulk: ${item.metadata.filename} ${reason} — Skip & Cancel`);
+    fireItemStatus(item.id, "failed", undefined, reason);
+    await clickFirst([...BULK.skipDesign]);
+    return { ok: false, error: reason };
   }
 
-  if (succeeded.length === 0) {
-    log(`bulk: no designs filled successfully — nothing to publish`);
-    return { ok: false, succeeded, failed, error: "no designs filled" };
+  // Fill listing + colors + products only (no per-design publish).
+  let fill: { ok: boolean; error?: string };
+  try {
+    fill = await runUpload(item, "", true, true); // skipUpload + skipPublish
+  } catch (e) {
+    fill = { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
+  if (!fill.ok) {
+    log(`bulk: ${item.metadata.filename} fill FAILED: ${fill.error} — Skip & Cancel`);
+    fireItemStatus(item.id, "failed", undefined, fill.error);
+    await clickFirst([...BULK.skipDesign]);
+    return { ok: false, error: fill.error };
+  }
+  log(`bulk: ${item.metadata.filename} filled, colors ok`);
 
-  // One terms acceptance + one PUBLISH ALL for the whole batch.
-  await acceptBulkTerms();
-  await sleep(400);
-  // Fire successes BEFORE PUBLISH ALL — publishing navigates away and would
-  // destroy this content script before it could report afterwards.
-  for (const id of succeeded) fireItemStatus(id, "succeeded");
+  // Mark succeeded BEFORE the navigating click — NEXT DESIGN / PUBLISH ALL both
+  // navigate and destroy this content script's sendResponse callback.
+  fireItemStatus(item.id, "succeeded");
 
-  const published = await clickPublishAll(30_000);
-  log(published
-    ? `bulk: PUBLISH ALL confirmed — ${succeeded.length} design(s) published`
-    : `bulk: PUBLISH ALL click sent but transition not confirmed (statuses already reported)`);
-
-  return { ok: true, succeeded, failed };
+  if (isLast) {
+    await acceptBulkTerms();
+    await sleep(300);
+    const ok = await clickPublishAll(30_000);
+    log(ok ? "bulk: PUBLISH ALL confirmed" : "bulk: PUBLISH ALL click sent (transition not confirmed)");
+  } else {
+    const ok = await clickNextDesign(25_000);
+    log(ok ? "bulk: advanced to next design" : "bulk: NEXT DESIGN did not confirm advance");
+  }
+  return { ok: true };
 }
 
 /** Wait for a design's listing/edit form to be ready, tolerating the

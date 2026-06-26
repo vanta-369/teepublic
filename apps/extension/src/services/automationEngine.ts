@@ -81,15 +81,17 @@ class AutomationEngine {
     }
   }
 
-  /** BULK: dispatch all files on /designs/bulk_uploader → GET STARTED → wait
-   *  through "Waiting for your designs to process" → fill each design's listing,
-   *  click NEXT DESIGN between them, and PUBLISH ALL on the last.
-   *    1. dispatch all files (content waits for the upload to FINISH, then clicks
-   *       GET STARTED).
-   *    2. let the editing view render.
-   *    3. one AUTOMATION_BULK_RUN drives fill → NEXT DESIGN → … → PUBLISH ALL;
-   *       the content script reports each design's status via ITEM_STATUS, so the
-   *       results survive PUBLISH ALL's navigation (and worker suspension).
+  /** BULK: dispatch all files on /designs/bulk_uploader → GET STARTED → fill
+   *  each design's listing, click NEXT DESIGN between them, and PUBLISH ALL on
+   *  the last.
+   *    1. dispatch all files (content waits for upload+processing to FINISH, then
+   *       clicks GET STARTED).
+   *    2. wait for design 1's /designs/<id>/edit page (abort if it never opens).
+   *    3. for each design (in upload order): fill it, then NEXT DESIGN — which
+   *       navigates to the next design's /edit page — or PUBLISH ALL on the last.
+   *       Wait for a NEW /edit id before filling the next. The content script
+   *       reports each design's status via ITEM_STATUS, so results survive the
+   *       navigation (and worker suspension).
    *  Single mode is untouched. */
   private async runBulk(items: QueueItem[]) {
     for (const it of items) {
@@ -114,20 +116,36 @@ class AutomationEngine {
       }
       const ordered = validIds.map((id) => items.find((i) => i.id === id)!).filter(Boolean);
 
-      // 2. Let the editing view render after GET STARTED. TeePublic shows a
-      //    "Waiting for your designs to process" page first; the content script
-      //    waits through it. Re-ensure the script in case the DOM was swapped.
-      await new Promise((r) => setTimeout(r, 3_000));
-      await ensureContentScriptReady(tabId);
+      // 2. Get Started navigates to design 1's /designs/<id>/edit page once
+      //    processing finishes. Wait for it; abort gracefully if it never opens.
+      let prevEditId = await waitForEditPage(tabId, null, 60_000);
+      if (!prevEditId) {
+        throw new Error("bulk: Get Started did not open an edit page (designs may have been rejected / still processing) — aborting");
+      }
 
-      // 3. Drive the whole edit → NEXT DESIGN → PUBLISH ALL loop in one call. The
-      //    content script reports each design's status itself, so a dropped
-      //    response (PUBLISH ALL navigation) or a suspended worker still leaves
-      //    correct statuses behind.
-      try {
-        await sendToTab(tabId, { type: "AUTOMATION_BULK_RUN", items: ordered });
-      } catch {
-        // PUBLISH ALL navigation can close the message port — ignore.
+      // 3. Fill each design on its /edit page, then NEXT DESIGN → … → PUBLISH
+      //    ALL on the last. NEXT DESIGN navigates to the next design's /edit
+      //    page, so before filling design k>0 wait for a /edit page with a NEW
+      //    id. The content script reports each design's status via ITEM_STATUS,
+      //    so a dropped response (navigation) still leaves correct statuses.
+      for (let k = 0; k < ordered.length; k++) {
+        if (k > 0) {
+          const nextId = await waitForEditPage(tabId, prevEditId, 60_000);
+          if (!nextId) {
+            BulkLogStore.append(`bulk: no further edit page after design ${k} — stopping`);
+            break;
+          }
+          prevEditId = nextId;
+        }
+        await ensureContentScriptReady(tabId);
+        const isLast = k === ordered.length - 1;
+        try {
+          await sendToTab(tabId, { type: "AUTOMATION_BULK_FILL_ADVANCE", item: ordered[k], isLast });
+        } catch {
+          // NEXT DESIGN / PUBLISH ALL navigation can drop the response — the
+          // content script already fired ITEM_STATUS.
+        }
+        await humanDelay(800, 1_500);
       }
 
       await new Promise((r) => setTimeout(r, 2_500));
@@ -261,6 +279,20 @@ function sendToTab<T>(tabId: number, message: unknown): Promise<T> {
       resolve(response as T);
     });
   });
+}
+
+/** Poll a tab's URL until it's a /designs/<id>/edit page whose id differs from
+ *  `excludeId` (pass null to accept any edit page). Returns the edit id, or null
+ *  on timeout. Ignores the brief /t-shirt/<slug> interstitial after a publish. */
+async function waitForEditPage(tabId: number, excludeId: string | null, timeoutMs: number): Promise<string | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const url = (await chrome.tabs.get(tabId).catch(() => null))?.url ?? "";
+    const m = url.match(/\/designs\/(\d+)\/edit/);
+    if (m && m[1] !== excludeId) return m[1];
+    await new Promise((r) => setTimeout(r, 400));
+  }
+  return null;
 }
 
 async function navigateAndWait(tabId: number, url: string): Promise<void> {
