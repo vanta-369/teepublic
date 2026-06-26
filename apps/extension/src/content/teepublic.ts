@@ -589,7 +589,7 @@ async function runBulkDispatch(
     // designs to process" is shown does nothing (the page stays on
     // /designs/bulk_uploader). So wait until BOTH uploading and processing are
     // done and the tiles + Get Started button are present before reporting ready.
-    const done = await waitForBulkProcessingDone(120_000);
+    const done = await waitForBulkProcessingDone(valid.length, 120_000);
     if (!done) {
       const err = "bulk processing did not finish in time (designs still processing)";
       log(`bulk aborted: ${err}`);
@@ -616,43 +616,46 @@ async function clickGetStarted(): Promise<void> {
   }
 }
 
-/** Wait until TeePublic finishes UPLOADING and PROCESSING the dropped files, so
- *  we never click GET STARTED too early. Two phases happen on the bulk_uploader
- *  page: "UPLOADING… N%", then "Waiting for your designs to process". Done only
- *  when both are gone AND the Get Started button (+ tiles) are present. Returns
- *  false on timeout. */
-async function waitForBulkProcessingDone(timeoutMs: number): Promise<boolean> {
+/** Wait until ALL dropped designs are uploaded, processed, and VISIBLE before we
+ *  click GET STARTED. On /designs/bulk_uploader there are two phases —
+ *  "UPLOADING… N%" then "Waiting for your designs to process" — and only once
+ *  they finish does TeePublic show the banner "…click GET STARTED to create your
+ *  products" with all the design tiles. We proceed ONLY when:
+ *    • neither "uploading" nor "waiting … to process" text is present, AND
+ *    • the Get Started button is present, AND
+ *    • the success banner shows OR all `expectedTiles` tiles are visible.
+ *  Returns false on timeout. */
+async function waitForBulkProcessingDone(expectedTiles: number, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
-  let sawWork = false;          // upload/processing actually started
   let lastProcLog = 0;
   let lastPct = "";
   while (Date.now() < deadline) {
     const body = (document.body.textContent ?? "").toLowerCase();
     const uploading = /uploading/.test(body);
     const processing = /waiting for your designs to process/.test(body);
+    // The success banner appears only once every design has finished processing.
+    const banner = /create your products/.test(body) || /you can add more files/.test(body);
+    const tiles = countBulkTiles();
+    const getStarted = !!document.querySelector(".jsBulkUploaderSubmit") ||
+                       findByVisibleText("div", "Get Started") != null;
 
     if (uploading) {
-      sawWork = true;
       const pct = body.match(/uploading[.\s…]*?(\d+)%/);
       if (pct && pct[1] !== lastPct) { lastPct = pct[1]; log(`bulk upload progress: ${pct[1]}%`); }
     }
-    if (processing) {
-      sawWork = true;
-      if (Date.now() - lastProcLog > 4_000) { log("bulk: designs still processing… waiting"); lastProcLog = Date.now(); }
+    if (processing && Date.now() - lastProcLog > 4_000) {
+      log(`bulk: designs still processing… waiting (${tiles}/${expectedTiles} tiles visible)`);
+      lastProcLog = Date.now();
     }
 
-    if (!uploading && !processing) {
-      // Both phases finished — require Get Started present before proceeding.
-      const getStarted = !!document.querySelector(".jsBulkUploaderSubmit") ||
-                         findByVisibleText("div", "Get Started") != null;
-      if (getStarted && sawWork) {
-        const tiles = countBulkTiles();
-        log(`bulk: processing done, ${tiles} tile(s), clicking Get Started once ready`);
-        return true;
-      }
+    const allTilesVisible = expectedTiles > 0 && tiles >= expectedTiles;
+    if (getStarted && !uploading && !processing && (banner || allTilesVisible)) {
+      log(`bulk: processing done, ${tiles}/${expectedTiles} tile(s) visible — clicking Get Started`);
+      return true;
     }
     await sleep(500);
   }
+  log(`bulk: gave up waiting — tiles ${countBulkTiles()}/${expectedTiles}`);
   return false;
 }
 
@@ -663,6 +666,8 @@ function countBulkTiles(): number {
     '[class*="bulk-uploader__design" i]',
     '[class*="bulk_uploader_design" i]',
     '[class*="uploaded-design" i]',
+    '[class*="design-tile" i]',
+    '[class*="design-preview" i]',
   ];
   for (const s of sels) {
     const n = document.querySelectorAll(s).length;
