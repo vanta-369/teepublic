@@ -75,19 +75,19 @@ export const QueueStore = {
 };
 
 // ── Bulk-run state ─────────────────────────────────────────────────────────
-// A bulk upload spans several full page navigations (bulk_uploader → each
-// /designs/<id>/edit), each of which destroys the content script. So the run
-// is persisted here and the content script self-drives off it on every load.
+// A bulk upload spans many full page navigations: bulk_uploader → design 1's
+// /designs/<id>/edit → (publish auto-loads) design 2's /edit → … Each
+// navigation destroys the content script, so the run is persisted HERE and the
+// content script self-resumes off it on every /edit page load: read `items` +
+// `index`, fill items[index] on THIS page, publish, advance the index, and let
+// TeePublic load the next design.
 const BULK_KEY = "teepublic.bulk";
 
 export interface BulkState {
   active: boolean;
-  items: QueueItem[];
-  imageDataUrls: string[];
-  phase: "upload" | "editing";
-  lastDesignId: string | null; // design id we last filled — dedupes re-inits
-  filledItemIds: string[];      // queue items already filled — never fill twice
-  steps: number;                // navigations handled — bounds the loop
+  items: QueueItem[];           // ordered, validated items in UPLOAD order
+  index: number;                // next item to fill (0-based)
+  lastDesignId: string | null;  // /edit id we last claimed — dedupes re-entry
   startedAt: number;
 }
 

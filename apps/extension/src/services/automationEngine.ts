@@ -4,7 +4,7 @@
 // - Delegates all in-page work to the content script via chrome.tabs.sendMessage.
 
 import type { QueueItem } from "@teepublic/shared";
-import { QueueStore, SettingsStore, BulkLogStore, ImageStore } from "./queueStore";
+import { QueueStore, SettingsStore, BulkLogStore, ImageStore, BulkStateStore } from "./queueStore";
 import { humanDelay } from "../lib/delays";
 
 type EngineState = "idle" | "running" | "paused" | "stopped";
@@ -81,17 +81,16 @@ class AutomationEngine {
     }
   }
 
-  /** BULK: dispatch all files on /designs/bulk_uploader → GET STARTED → fill +
-   *  Publish each design on its own /designs/<id>/edit page.
-   *    1. dispatch all files (content waits for upload+processing to FINISH, then
-   *       clicks GET STARTED).
-   *    2. wait for design 1's /designs/<id>/edit page (abort if it never opens).
-   *    3. for each design (in upload order): fill it, click Publish — TeePublic
-   *       auto-loads the next design's /edit page — wait for a NEW /edit id,
-   *       repeat. Broken designs use the skip?id=<id> link to advance. The
-   *       content script reports each design's status via ITEM_STATUS, so results
-   *       survive the navigation (and worker suspension).
-   *  Single mode is untouched. */
+  /** BULK: kick off TeePublic's bulk uploader, then let the CONTENT SCRIPT
+   *  self-drive across the many /designs/<id>/edit pages it loads.
+   *    1. dispatch all files (content waits for upload+processing to FINISH,
+   *       persists the run state — items in upload order + index — then clicks
+   *       GET STARTED, which opens design 1's /edit page).
+   *    2. the content script, on EACH /edit page load, fills items[index],
+   *       Publishes (which auto-loads the next design's /edit page), and advances
+   *       the index — surviving every navigation via chrome.storage.
+   *  The engine just monitors until every dispatched item is resolved (each fires
+   *  ITEM_STATUS), then reconciles and clears the run state. Single mode untouched. */
   private async runBulk(items: QueueItem[]) {
     for (const it of items) {
       await QueueStore.setItemStatus(it.id, "running", { attempts: it.attempts + 1, lastError: undefined });
@@ -103,58 +102,65 @@ class AutomationEngine {
       for (const it of items) imageDataUrls.push(await imageDataUrlFor(it));
       await ensureContentScriptReady(tabId);
 
-      // 1. Dispatch all files. The content script waits for the upload to finish,
-      //    replies with the valid ids (in upload order), then clicks GET STARTED.
+      // 1. Dispatch all files. The content script waits for processing to finish,
+      //    persists the run (items + index), and clicks GET STARTED. From here on
+      //    the content script self-resumes on every /edit page it lands on.
       const disp = await sendToTab<{ ok: boolean; validIds?: string[]; error?: string }>(
         tabId, { type: "AUTOMATION_BULK_DISPATCH", items, imageDataUrls });
       const validIds = disp?.validIds ?? [];
       if (validIds.length === 0) {
         // Every design was too small / rejected / upload failed — statuses fired.
+        await BulkStateStore.set(null);
         await this.reconcileBulk(items);
         return;
       }
-      const ordered = validIds.map((id) => items.find((i) => i.id === id)!).filter(Boolean);
 
-      // 2. Get Started navigates to design 1's /designs/<id>/edit page once
-      //    processing finishes. Wait for it; abort gracefully if it never opens.
-      let prevEditId = await waitForEditPage(tabId, null, 60_000);
-      if (!prevEditId) {
-        throw new Error("bulk: Get Started did not open an edit page (designs may have been rejected / still processing) — aborting");
-      }
+      // 2. Monitor: wait until every dispatched design is resolved (succeeded or
+      //    failed via ITEM_STATUS) or the run goes idle. ~2 min budget/design.
+      const dispatched = validIds.map((id) => items.find((i) => i.id === id)!).filter(Boolean);
+      await this.waitForBulkComplete(dispatched, validIds.length * 120_000 + 60_000);
 
-      // 3. Fill + Publish each design on its /edit page. Publishing auto-loads
-      //    the NEXT design's /edit page, so before filling design k>0 wait for a
-      //    /edit page with a NEW id (skipping any /t-shirt/<slug> interstitial).
-      //    The content script reports each design's status via ITEM_STATUS, so a
-      //    dropped response (the publish navigation) still leaves correct statuses.
-      for (let k = 0; k < ordered.length; k++) {
-        if (k > 0) {
-          const nextId = await waitForEditPage(tabId, prevEditId, 60_000);
-          if (!nextId) {
-            BulkLogStore.append(`bulk: no further edit page after design ${k} — finishing`);
-            break;
-          }
-          prevEditId = nextId;
-        }
-        await ensureContentScriptReady(tabId);
-        try {
-          await sendToTab(tabId, { type: "AUTOMATION_FILL_PUBLISH_DRAFT", item: ordered[k] });
-        } catch {
-          // Publishing navigates and can drop the response — the content script
-          // already fired ITEM_STATUS.
-        }
-        await humanDelay(800, 1_500);
-      }
-
-      await new Promise((r) => setTimeout(r, 2_500));
+      await BulkStateStore.set(null); // clear run state
       await this.reconcileBulk(items);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      await BulkStateStore.set(null);
       for (const it of items) {
         const b = await QueueStore.get();
         if (b?.items.find((i) => i.id === it.id)?.status === "succeeded") continue;
         await QueueStore.setItemStatus(it.id, "failed", { lastError: message });
       }
+    }
+  }
+
+  /** Wait until the self-driving content script has resolved every dispatched
+   *  design (each ends "succeeded" or "failed"), the run flag clears, or we hit
+   *  the overall budget. Tolerates the worker being suspended between checks. */
+  private async waitForBulkComplete(dispatched: QueueItem[], timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    let lastProgress = Date.now();
+    let lastDone = -1;
+    while (Date.now() < deadline) {
+      const b = await QueueStore.get();
+      const done = dispatched.filter((it) => {
+        const s = b?.items.find((i) => i.id === it.id)?.status;
+        return s === "succeeded" || s === "failed";
+      }).length;
+      if (done >= dispatched.length) return;          // all resolved
+      const state = await BulkStateStore.get();
+      if (!state || !state.active) {
+        // Content marked the run complete; give late ITEM_STATUS a moment.
+        await new Promise((r) => setTimeout(r, 2_000));
+        return;
+      }
+      // Stall guard: if no design has resolved for a long time, bail so the
+      // remaining items get reconciled to "failed" rather than hanging forever.
+      if (done !== lastDone) { lastDone = done; lastProgress = Date.now(); }
+      else if (Date.now() - lastProgress > 180_000) {
+        BulkLogStore.append(`bulk: no progress for 3 min (${done}/${dispatched.length} done) — stopping`);
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 2_000));
     }
   }
 
@@ -189,6 +195,10 @@ class AutomationEngine {
   }
 
   private async runOne(item: QueueItem) {
+    // Guard: clear any leftover bulk run state so the content script's bulk
+    // self-driver can never hijack a single-flow /designs/<id>/edit page.
+    await BulkStateStore.set(null);
+
     // Safety net: never re-run a completed item, no matter how it got back
     // into the loop. The status check in the orchestrator should already
     // prevent this, but a stale snapshot or storage race could otherwise let
@@ -277,20 +287,6 @@ function sendToTab<T>(tabId: number, message: unknown): Promise<T> {
       resolve(response as T);
     });
   });
-}
-
-/** Poll a tab's URL until it's a /designs/<id>/edit page whose id differs from
- *  `excludeId` (pass null to accept any edit page). Returns the edit id, or null
- *  on timeout. Ignores the brief /t-shirt/<slug> interstitial after a publish. */
-async function waitForEditPage(tabId: number, excludeId: string | null, timeoutMs: number): Promise<string | null> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const url = (await chrome.tabs.get(tabId).catch(() => null))?.url ?? "";
-    const m = url.match(/\/designs\/(\d+)\/edit/);
-    if (m && m[1] !== excludeId) return m[1];
-    await new Promise((r) => setTimeout(r, 400));
-  }
-  return null;
 }
 
 async function navigateAndWait(tabId: number, url: string): Promise<void> {

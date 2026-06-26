@@ -5,7 +5,7 @@
 
 import type { QueueItem } from "@teepublic/shared";
 import { TP, BULK } from "../lib/selectors";
-import { BulkLogStore } from "../services/queueStore";
+import { BulkLogStore, BulkStateStore } from "../services/queueStore";
 import {
   firstMatching,
   setFileInput,
@@ -38,6 +38,13 @@ if (typeof location !== "undefined" && /\/(t-shirt|hoodie|tank-top|crewneck-swea
     console.warn("[teepublic-cs] PUBLISHED_URL_DETECTED send failed:", e);
   }
 }
+
+// Bulk self-resume: a bulk run spans many /designs/<id>/edit pages, each a fresh
+// page load that destroys this content script. State lives in chrome.storage, so
+// on EVERY load we check whether we're on a bulk /edit page and, if so, fill +
+// publish the next queued design. TeePublic then auto-loads the next /edit page
+// and this runs again. (No-op unless a bulk run is active and we're on /edit.)
+void maybeDriveBulkEditPage();
 
 
 /** URLs we've already announced as publish-success during this content
@@ -84,24 +91,28 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
     if (message?.type === "AUTOMATION_BULK_DISPATCH") {
       // On /designs/bulk_uploader: pre-validate sizes, dispatch the valid files,
-      // wait for GET STARTED, reply with the valid ids (in upload order), THEN
-      // click GET STARTED (which navigates to design 1's /designs/<id>/edit).
+      // wait for processing to FINISH, reply with the valid ids (upload order),
+      // PERSIST the run (items + index) so each /edit page can self-resume, THEN
+      // click GET STARTED (which opens design 1's /designs/<id>/edit page).
       const result = await runBulkDispatch(message.items, message.imageDataUrls);
       sendResponse(result);
       if (result.ok && result.validIds.length > 0) {
-        // runBulkDispatch already waited for the upload to FINISH; a short extra
-        // settle keeps us clear of the "You must upload images to continue" alert.
+        const ordered = result.validIds
+          .map((id: string) => (message.items as QueueItem[]).find((i) => i.id === id))
+          .filter((i): i is QueueItem => !!i);
+        await BulkStateStore.set({
+          active: true,
+          items: ordered,
+          index: 0,
+          lastDesignId: null,
+          startedAt: Date.now(),
+        });
+        log(`bulk: persisted run state (${ordered.length} designs) — clicking Get Started`);
+        // A short settle keeps us clear of "You must upload images to continue".
         await sleep(1_500);
         await clickGetStarted();
       }
       return;
-    }
-    if (message?.type === "AUTOMATION_FILL_PUBLISH_DRAFT") {
-      // On a /designs/<id>/edit page: fill this one design and click Publish.
-      // Publishing auto-advances TeePublic to the next design's /edit page; the
-      // engine waits for that new /edit URL before sending the next one.
-      const result = await fillAndPublishDraft(message.item);
-      return sendResponse(result);
     }
     return sendResponse({ ok: false, error: "unknown message" });
   })();
@@ -678,14 +689,41 @@ function countBulkTiles(): number {
   return document.querySelectorAll('img[src^="blob:"], img[src^="data:image"], img[src*="amazonaws"], img[src*="cloudfront"]').length;
 }
 
-/** Fill ONE design on its /designs/<id>/edit page, then advance:
- *    • fill listing + colors + products (no artwork upload — already done),
- *    • mark the item succeeded (before the navigating click, so it survives),
- *    • if isLast → accept terms + click PUBLISH ALL (publishes the batch),
- *      else  → click NEXT DESIGN (navigates to the next design's /edit page).
- *  The engine calls this once per design (it waits for each /edit page first).
- *  Reuses runUpload's fill/colors/BLOCKING via skipUpload+skipPublish — single
- *  mode is untouched. */
+/** On each /designs/<id>/edit page load, if a bulk run is active, fill + publish
+ *  the next queued design. Self-resumes across the navigations TeePublic drives
+ *  (publishing a design auto-loads the next design's /edit page). Binds pages to
+ *  queue items by upload ORDER via the persisted index — no image matching. */
+async function maybeDriveBulkEditPage(): Promise<void> {
+  const editId = (location.href.match(/\/designs\/(\d+)\/edit/) || [])[1];
+  if (!editId) return;                  // not a bulk /edit page
+  const state = await BulkStateStore.get();
+  if (!state || !state.active) return;  // no active bulk run
+
+  // Dedup: the content script can re-run on the same page — never re-fill an
+  // /edit id we've already claimed.
+  if (state.lastDesignId === editId) return;
+
+  if (state.index >= state.items.length) {
+    await BulkStateStore.patch({ active: false });
+    log(`bulk: all ${state.items.length} design(s) handled — bulk complete`);
+    return;
+  }
+
+  const item = state.items[state.index];
+  log(`bulk: editing ${state.index + 1}/${state.items.length} (id=${editId}) ← ${item.metadata.filename}`);
+
+  // Claim this id + advance the index NOW, so if the publish navigation kills us
+  // mid-flight the NEXT /edit page picks up the following item (never re-fills).
+  await BulkStateStore.patch({ lastDesignId: editId, index: state.index + 1 });
+
+  // fillAndPublishDraft fires ITEM_STATUS and clicks Publish (or Skip) — both
+  // navigate to the next design's /edit page, where this driver runs again.
+  await fillAndPublishDraft(item);
+}
+
+/** Fill ONE design on its /designs/<id>/edit page and Publish it. Publishing
+ *  auto-loads the NEXT design's /edit page. Reuses runUpload's fill/colors/
+ *  BLOCKING via skipUpload+skipPublish — single mode is untouched. */
 async function fillAndPublishDraft(item: QueueItem): Promise<{ ok: boolean; error?: string }> {
   lastFiredItemId = null; // per-design isolation (runUpload makes its own filled set)
   log(`── bulk design: ${item.metadata.filename} (${location.pathname}) ──`);
