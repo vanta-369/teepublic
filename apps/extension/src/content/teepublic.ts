@@ -39,12 +39,13 @@ if (typeof location !== "undefined" && /\/(t-shirt|hoodie|tank-top|crewneck-swea
   }
 }
 
-// Bulk self-resume: a bulk run spans many /designs/<id>/edit pages, each a fresh
-// page load that destroys this content script. State lives in chrome.storage, so
-// on EVERY load we check whether we're on a bulk /edit page and, if so, fill +
-// publish the next queued design. TeePublic then auto-loads the next /edit page
-// and this runs again. (No-op unless a bulk run is active and we're on /edit.)
-void maybeDriveBulkEditPage();
+// Bulk self-resume: a bulk run spans many full page loads — the bulk_uploader
+// interstitial ("N of M designs ready for editing… redirected in a moment") and
+// then one /designs/<id>/edit page per design — each of which destroys this
+// content script. State lives in chrome.storage, so on EVERY load we resume:
+// wait out the interstitial on bulk_uploader, and fill+publish on each /edit
+// page. (No-op unless a bulk run is active.)
+void maybeResumeBulk();
 
 
 /** URLs we've already announced as publish-success during this content
@@ -111,17 +112,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         // A short settle keeps us clear of "You must upload images to continue".
         await sleep(1_500);
         await clickGetStarted();
-        // After GET STARTED TeePublic shows "N OF M DESIGNS READY FOR EDITING…
-        // YOU'LL BE REDIRECTED" (the count climbs 0→M) before redirecting to the
-        // first /designs/<id>/edit page. Wait that out, then drive. (If the
-        // redirect is a full navigation this content script is replaced and the
-        // fresh /edit page's load-time driver takes over instead.)
-        const redirected = await waitForBulkRedirectToEdit(120_000);
-        if (redirected) await maybeDriveBulkEditPage();
-        else {
-          log("bulk: timed out (120s) waiting for the edit-page redirect after Get Started — aborting");
-          await BulkStateStore.set(null);
-        }
+        // Get Started shows the "N of M designs ready… redirected in a moment"
+        // interstitial then opens design 1's /edit page. If this content script
+        // survives (in-place), maybeResumeBulk waits it out and drives; if Get
+        // Started reloads the page, the fresh load's maybeResumeBulk takes over.
+        await maybeResumeBulk();
       }
       return;
     }
@@ -698,6 +693,37 @@ function countBulkTiles(): number {
     if (n > 0) return n;
   }
   return document.querySelectorAll('img[src^="blob:"], img[src^="data:image"], img[src*="amazonaws"], img[src*="cloudfront"]').length;
+}
+
+/** Resume an active bulk run on whatever page this content script loaded on:
+ *   • /designs/bulk_uploader still showing "N of M designs ready for editing…
+ *     redirected in a moment" → wait for TeePublic to open the first edit page,
+ *     then drive it (covers an in-place redirect; a full-navigation redirect is
+ *     picked up by the NEXT page's load-time resume).
+ *   • /designs/<id>/edit → fill + publish that design.
+ *  No-op when no bulk run is active. */
+async function maybeResumeBulk(): Promise<void> {
+  const state = await BulkStateStore.get();
+  if (!state || !state.active) return;
+
+  if (/\/designs\/\d+\/edit/.test(location.href)) {
+    await maybeDriveBulkEditPage();
+    return;
+  }
+
+  if (/\/designs\/bulk_uploader/.test(location.href)) {
+    const body = document.body.textContent ?? "";
+    const interstitial = /\d+\s+of\s+\d+\s+designs?\s+ready\s+for\s+editing/i.test(body) ||
+                         /redirected in a moment/i.test(body);
+    if (!interstitial) return; // not the post-Get-Started preparing state
+    log('bulk: on the "designs ready for editing" interstitial — waiting for the edit-page redirect…');
+    const redirected = await waitForBulkRedirectToEdit(120_000);
+    if (redirected) await maybeDriveBulkEditPage();
+    else {
+      log("bulk: 120s timeout waiting for the edit-page redirect — aborting");
+      await BulkStateStore.set(null);
+    }
+  }
 }
 
 /** On each /designs/<id>/edit page load, if a bulk run is active, fill + publish
