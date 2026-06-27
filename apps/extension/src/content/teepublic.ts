@@ -755,20 +755,18 @@ async function maybeDriveBulkEditPage(): Promise<void> {
  *  shows. Returns false on timeout. */
 async function waitForBulkRedirectToEdit(timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
-  let lastLog = 0;
   while (Date.now() < deadline) {
     const raw = document.body.textContent ?? "";
+    // End ONLY when TeePublic has redirected to the per-design edit page.
     const onEdit = /\/designs\/\d+\/edit/.test(location.href);
     const titleInput = document.querySelector('input[name="design[design_title]"]');
     const hasCurrentlyEditing = /currently editing design/i.test(raw);
     if (onEdit && titleInput && hasCurrentlyEditing) return true;
 
-    if (Date.now() - lastLog > 1_000) {
-      const m = raw.match(/\d+\s+of\s+\d+\s+designs?\s+ready\s+for\s+editing/i);
-      const snippet = m ? m[0].trim() : (/redirected/i.test(raw) ? "you'll be redirected" : "preparing…");
-      log(`bulk: waiting for redirect… (${snippet.slice(0, 60)})`);
-      lastLog = Date.now();
-    }
+    // Still preparing drafts — keep waiting (never fill/re-click/abort here).
+    const m = raw.match(/\d+\s+of\s+\d+\s+designs?\s+ready\s+for\s+editing/i);
+    const text = m ? m[0].trim() : (/redirected in a moment/i.test(raw) ? "redirected in a moment" : "");
+    log(text ? `bulk: preparing… "${text}"` : "bulk: waiting for redirect to the edit page…");
     await sleep(1_000);
   }
   return false;
