@@ -111,6 +111,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         // A short settle keeps us clear of "You must upload images to continue".
         await sleep(1_500);
         await clickGetStarted();
+        // After GET STARTED TeePublic shows "N OF M DESIGNS READY FOR EDITING…
+        // YOU'LL BE REDIRECTED" (the count climbs 0→M) before redirecting to the
+        // first /designs/<id>/edit page. Wait that out, then drive. (If the
+        // redirect is a full navigation this content script is replaced and the
+        // fresh /edit page's load-time driver takes over instead.)
+        const redirected = await waitForBulkRedirectToEdit(120_000);
+        if (redirected) await maybeDriveBulkEditPage();
+        else {
+          log("bulk: timed out (120s) waiting for the edit-page redirect after Get Started — aborting");
+          await BulkStateStore.set(null);
+        }
       }
       return;
     }
@@ -706,7 +717,7 @@ async function maybeDriveBulkEditPage(): Promise<void> {
 
   // Wait through "A LITTLE DESIGN MAGIC IN PROGRESS…" / "N OF M DESIGNS READY…
   // YOU'LL BE REDIRECTED…" until the edit UI mounts (counter + title input).
-  const ui = await waitForBulkEditUI(90_000);
+  const ui = await waitForBulkEditUI(120_000);
   if (ui === "timeout") {
     log(`bulk: edit UI never appeared on id=${editId} — skipping this page`);
     await BulkStateStore.patch({ lastDesignId: editId });
@@ -733,6 +744,34 @@ async function maybeDriveBulkEditPage(): Promise<void> {
   // fillAndPublishDraft fires ITEM_STATUS and clicks Publish (or Skip) — both
   // navigate to the next design's /edit page, where this driver runs again.
   await fillAndPublishDraft(item);
+}
+
+/** Right after GET STARTED, poll (every 1s, up to ~120s) through the
+ *  "N OF M DESIGNS READY FOR EDITING… YOU'LL BE REDIRECTED" interstitial (the
+ *  count climbs 0→M, and can sit at "0 OF M" for a while — that's normal) until
+ *  TeePublic redirects to the first design's edit page. Done only when the URL
+ *  is /designs/<id>/edit AND the title input is mounted AND "Currently Editing
+ *  Design" is present. Never fills / re-clicks / aborts while the interstitial
+ *  shows. Returns false on timeout. */
+async function waitForBulkRedirectToEdit(timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  let lastLog = 0;
+  while (Date.now() < deadline) {
+    const raw = document.body.textContent ?? "";
+    const onEdit = /\/designs\/\d+\/edit/.test(location.href);
+    const titleInput = document.querySelector('input[name="design[design_title]"]');
+    const hasCurrentlyEditing = /currently editing design/i.test(raw);
+    if (onEdit && titleInput && hasCurrentlyEditing) return true;
+
+    if (Date.now() - lastLog > 1_000) {
+      const m = raw.match(/\d+\s+of\s+\d+\s+designs?\s+ready\s+for\s+editing/i);
+      const snippet = m ? m[0].trim() : (/redirected/i.test(raw) ? "you'll be redirected" : "preparing…");
+      log(`bulk: waiting for redirect… (${snippet.slice(0, 60)})`);
+      lastLog = Date.now();
+    }
+    await sleep(1_000);
+  }
+  return false;
 }
 
 /** Wait through TeePublic's post-GET-STARTED interstitial ("A little design
