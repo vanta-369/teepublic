@@ -108,7 +108,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           lastDesignId: null,
           startedAt: Date.now(),
         });
-        log(`bulk: persisted run state (${ordered.length} designs) — clicking Get Started`);
+        log(`bulk[dispatch]: persisted run state (${ordered.length} designs, ids=${ordered.map((i) => i.id).join(",")}) — about to click Get Started`);
         // A short settle keeps us clear of "You must upload images to continue".
         await sleep(1_500);
         await clickGetStarted();
@@ -598,7 +598,7 @@ async function runBulkDispatch(
     const files = valid.map((v, i) =>
       dataUrlToFile(v.dataUrl, v.item.metadata.filename || `design_${i + 1}.png`, v.item.imageMime || "image/png"));
     await setFileInputMultiple(input, files);
-    log(`dispatched ${files.length} files — waiting for TeePublic to PROCESS them…`);
+    log(`bulk[dispatch]: dispatched ${files.length} file(s) — entering processing wait (need: no "Waiting for your designs to process" + Get Started visible + ${valid.length} tiles)…`);
 
     // CRITICAL: the GET STARTED div (.jsBulkUploaderSubmit) is in the DOM the
     // whole time. Clicking it while files are still UPLOADING triggers "You must
@@ -626,10 +626,11 @@ async function runBulkDispatch(
 async function clickGetStarted(): Promise<void> {
   try {
     const btn = await findClickable([...BULK.getStarted], 10_000);
+    log(`bulk[get-started]: found button <${btn.tagName.toLowerCase()} class="${btn.className}"> — clicking`);
     await fullClick(btn);
-    log(`clicked GET STARTED`);
+    log(`bulk[get-started]: ✓ clicked GET STARTED (url now ${location.pathname})`);
   } catch (e) {
-    log(`GET STARTED click failed: ${(e as Error).message}`);
+    log(`bulk[get-started]: ✗ click FAILED — ${(e as Error).message}`);
   }
 }
 
@@ -659,16 +660,25 @@ async function waitForBulkProcessingDone(expectedTiles: number, timeoutMs: numbe
     const getStartedVisible = (!!gsEl && gsEl.getBoundingClientRect().width > 0) ||
                               findByVisibleText("div", "Get Started") != null;
 
-    if (uploadPct !== null && uploadPct !== lastPct) { lastPct = uploadPct; log(`bulk upload progress: ${uploadPct}%`); }
-    if (tiles !== lastTiles) { lastTiles = tiles; log(`bulk: ${tiles}/${expectedTiles} design tile(s) processed`); }
-    if (stillProcessing && Date.now() - lastProcLog > 4_000) {
-      log("bulk: still processing uploads…");
+    if (uploadPct !== null && uploadPct !== lastPct) { lastPct = uploadPct; log(`bulk[wait-process]: upload ${uploadPct}%`); }
+    if (tiles !== lastTiles) { lastTiles = tiles; log(`bulk[wait-process]: ${tiles}/${expectedTiles} design tile(s) processed`); }
+
+    const ready = !stillProcessing && !uploading && getStartedVisible && expectedTiles > 0 && tiles >= expectedTiles;
+    // Detailed state every ~2s so the exact blocker is visible in the console.
+    if (Date.now() - lastProcLog > 2_000) {
+      const blockers: string[] = [];
+      if (stillProcessing) blockers.push('"Waiting for your designs to process" present');
+      if (uploading) blockers.push(`upload at ${uploadPct}%`);
+      if (!getStartedVisible) blockers.push("Get Started button not visible");
+      if (tiles < expectedTiles) blockers.push(`only ${tiles}/${expectedTiles} tiles`);
+      log(`bulk[wait-process]: ${ready ? "READY" : "BLOCKED → " + blockers.join("; ")} ` +
+          `| processing=${stillProcessing} upload=${uploadPct ?? "done"}% tiles=${tiles}/${expectedTiles} getStarted=${getStartedVisible}`);
       lastProcLog = Date.now();
     }
 
     // ALL THREE: not processing, Get Started visible, every design has a tile.
-    if (!stillProcessing && !uploading && getStartedVisible && expectedTiles > 0 && tiles >= expectedTiles) {
-      log(`bulk: processing done — ${tiles}/${expectedTiles} tile(s), Get Started visible — clicking`);
+    if (ready) {
+      log(`bulk[wait-process]: ✓ done — ${tiles}/${expectedTiles} tile(s), Get Started visible, no "processing" text — clicking GET STARTED`);
       return true;
     }
     await sleep(500);
@@ -708,9 +718,16 @@ function countBulkTiles(): number {
  *  No-op when no bulk run is active. */
 async function maybeResumeBulk(): Promise<void> {
   const state = await BulkStateStore.get();
-  if (!state || !state.active) return;
+  if (!state || !state.active) {
+    if (/\/designs\/(bulk_uploader|\d+\/edit)/.test(location.href)) {
+      log(`bulk[resume]: no active run (state=${state ? "inactive" : "none"}) on ${location.pathname} — idle`);
+    }
+    return;
+  }
+  log(`bulk[resume]: active run (index=${state.index}/${state.items.length}, lastId=${state.lastDesignId ?? "-"}) on ${location.pathname}`);
 
   if (/\/designs\/\d+\/edit/.test(location.href)) {
+    log("bulk[resume]: on an /edit page → drive it");
     await maybeDriveBulkEditPage();
     return;
   }
@@ -719,12 +736,15 @@ async function maybeResumeBulk(): Promise<void> {
     const body = document.body.textContent ?? "";
     const interstitial = /\d+\s+of\s+\d+\s+designs?\s+ready\s+for\s+editing/i.test(body) ||
                          /redirected in a moment/i.test(body);
-    if (!interstitial) return; // not the post-Get-Started preparing state
-    log('bulk: on the "designs ready for editing" interstitial — waiting for the edit-page redirect…');
+    if (!interstitial) {
+      log('bulk[resume]: on bulk_uploader but no "designs ready / redirected" interstitial yet — idle');
+      return; // not the post-Get-Started preparing state
+    }
+    log('bulk[resume]: on the "designs ready for editing" interstitial → waiting for the edit-page redirect…');
     const redirected = await waitForBulkRedirectToEdit(120_000);
     if (redirected) await maybeDriveBulkEditPage();
     else {
-      log("bulk: 120s timeout waiting for the edit-page redirect — aborting");
+      log("bulk[resume]: 120s timeout waiting for the edit-page redirect — aborting");
       await BulkStateStore.set(null);
     }
   }
@@ -743,13 +763,17 @@ async function maybeDriveBulkEditPage(): Promise<void> {
 
   // Dedup: the content script can re-run on the same page — never re-fill an
   // /edit id we've already claimed.
-  if (state.lastDesignId === editId) return;
+  if (state.lastDesignId === editId) {
+    log(`bulk[edit]: id=${editId} already claimed — skipping re-entry`);
+    return;
+  }
 
   // Wait through "A LITTLE DESIGN MAGIC IN PROGRESS…" / "N OF M DESIGNS READY…
   // YOU'LL BE REDIRECTED…" until the edit UI mounts (counter + title input).
+  log(`bulk[edit]: on /edit id=${editId} — waiting for the form to mount…`);
   const ui = await waitForBulkEditUI(120_000);
   if (ui === "timeout") {
-    log(`bulk: edit UI never appeared on id=${editId} — skipping this page`);
+    log(`bulk[edit]: edit UI never appeared on id=${editId} — skipping this page`);
     await BulkStateStore.patch({ lastDesignId: editId });
     return;
   }
@@ -807,9 +831,11 @@ async function waitForBulkRedirectToEdit(timeoutMs: number): Promise<boolean> {
       return false;
     }
     const text = m ? m[0].trim() : (/redirected in a moment/i.test(raw) ? "redirected in a moment" : "");
-    log(text ? `bulk: preparing… "${text}"` : "bulk: waiting for redirect to the edit page…");
+    log(`bulk[wait-redirect]: url=${onEdit ? "EDIT" : "uploader"} title=${!!titleInput} currentlyEditing=${hasCurrentlyEditing} ` +
+        (text ? `preparing="${text}"` : "(no interstitial text)"));
     await sleep(1_000);
   }
+  log("bulk[wait-redirect]: 120s timeout — no redirect to /edit");
   return false;
 }
 
@@ -822,19 +848,19 @@ async function waitForBulkEditUI(timeoutMs: number): Promise<"ready" | "timeout"
   let lastLog = 0;
   while (Date.now() < deadline) {
     const raw = document.body.textContent ?? "";
-    const body = raw.toLowerCase();
-    const interstitial = /design magic in progress/.test(body) ||
-                         /redirected in a moment/.test(body) ||
-                         /designs ready for editing/.test(body);
     const hasCounter = /currently editing design\s+\d+\s+of\s+\d+/i.test(raw);
     const titleInput = document.querySelector('input[name="design[design_title]"]');
-    if (hasCounter && titleInput) return "ready";
-    if (interstitial && Date.now() - lastLog > 4_000) {
-      log("bulk: TeePublic preparing drafts (design magic in progress) — waiting for the edit page…");
+    if (hasCounter && titleInput) {
+      log("bulk[wait-edit-ui]: ✓ form ready (counter + title input present)");
+      return "ready";
+    }
+    if (Date.now() - lastLog > 2_000) {
+      log(`bulk[wait-edit-ui]: waiting… currentlyEditingCounter=${hasCounter} titleInput=${!!titleInput}`);
       lastLog = Date.now();
     }
     await sleep(500);
   }
+  log("bulk[wait-edit-ui]: timeout — form never mounted");
   return "timeout";
 }
 
@@ -874,7 +900,7 @@ async function fillAndPublishDraft(item: QueueItem): Promise<{ ok: boolean; erro
     await clickSkipThisDesign();
     return { ok: false, error: fill.error };
   }
-  log(`bulk: ${item.metadata.filename} filled, colors ok`);
+  log(`bulk[edit]: ${item.metadata.filename} filled + colors ok — accepting terms + publishing`);
 
   await acceptBulkTerms();
   await sleep(300);
@@ -883,10 +909,11 @@ async function fillAndPublishDraft(item: QueueItem): Promise<{ ok: boolean; erro
   fireItemStatus(item.id, "succeeded");
   try {
     const publish = await findClickable([...TP.publishButton], 15_000);
+    log(`bulk[edit]: found Publish <${publish.tagName.toLowerCase()} class="${publish.className}"> — clicking`);
     await fullClick(publish);
-    log(`bulk: published ${item.metadata.filename} — TeePublic will load the next design`);
+    log(`bulk[edit]: ✓ published ${item.metadata.filename} — TeePublic will load the next design`);
   } catch (e) {
-    log(`bulk: publish click failed: ${(e as Error).message}`);
+    log(`bulk[edit]: ✗ publish click FAILED — ${(e as Error).message}`);
     return { ok: false, error: `publish click failed: ${(e as Error).message}` };
   }
   return { ok: true };
