@@ -690,9 +690,10 @@ function countBulkTiles(): number {
 }
 
 /** On each /designs/<id>/edit page load, if a bulk run is active, fill + publish
- *  the next queued design. Self-resumes across the navigations TeePublic drives
- *  (publishing a design auto-loads the next design's /edit page). Binds pages to
- *  queue items by upload ORDER via the persisted index — no image matching. */
+ *  the design TeePublic is currently editing. Self-resumes across the navigations
+ *  TeePublic drives (publishing a design auto-loads the next design's /edit page).
+ *  Binds each page to its queue item by TeePublic's "Currently Editing Design X
+ *  of Y" position (upload ORDER) — no image matching. */
 async function maybeDriveBulkEditPage(): Promise<void> {
   const editId = (location.href.match(/\/designs\/(\d+)\/edit/) || [])[1];
   if (!editId) return;                  // not a bulk /edit page
@@ -703,33 +704,66 @@ async function maybeDriveBulkEditPage(): Promise<void> {
   // /edit id we've already claimed.
   if (state.lastDesignId === editId) return;
 
-  if (state.index >= state.items.length) {
-    await BulkStateStore.patch({ active: false });
-    log(`bulk: all ${state.items.length} design(s) handled — bulk complete`);
+  // Wait through "A LITTLE DESIGN MAGIC IN PROGRESS…" / "N OF M DESIGNS READY…
+  // YOU'LL BE REDIRECTED…" until the edit UI mounts (counter + title input).
+  const ui = await waitForBulkEditUI(90_000);
+  if (ui === "timeout") {
+    log(`bulk: edit UI never appeared on id=${editId} — skipping this page`);
+    await BulkStateStore.patch({ lastDesignId: editId });
     return;
   }
 
-  const item = state.items[state.index];
-  const isFirst = state.index === 0;
-  log(`bulk: editing ${state.index + 1}/${state.items.length} (id=${editId}) ← ${item.metadata.filename}`);
-
-  // Claim this id + advance the index NOW, so if the publish navigation kills us
-  // mid-flight the NEXT /edit page picks up the following item (never re-fills).
-  await BulkStateStore.patch({ lastDesignId: editId, index: state.index + 1 });
-
-  // After GET STARTED, give TeePublic ~30s to finish loading the first edit page
-  // before we touch anything, then resume.
-  if (isFirst) {
-    const wait = 30_000 - (Date.now() - state.startedAt);
-    if (wait > 0) {
-      log(`bulk: waiting ${Math.round(wait / 1000)}s after Get Started before filling…`);
-      await sleep(wait);
-    }
+  // Bind by TeePublic's own "Currently Editing Design X of Y" position (1-based),
+  // falling back to the persisted index if the label can't be read.
+  const pos = readBulkDesignCounter();
+  const itemIndex = pos ? pos.current - 1 : state.index;
+  if (itemIndex < 0 || itemIndex >= state.items.length) {
+    await BulkStateStore.patch({ active: false });
+    log(`bulk: position ${itemIndex + 1} beyond ${state.items.length} design(s) — bulk complete`);
+    return;
   }
+
+  const item = state.items[itemIndex];
+  log(`bulk: editing ${pos ? `${pos.current} of ${pos.total}` : `#${itemIndex + 1}`} (id=${editId}) ← ${item.metadata.filename}`);
+
+  // Claim this id + record progress NOW, so if the publish navigation kills us
+  // mid-flight the NEXT /edit page picks up the following item (never re-fills).
+  await BulkStateStore.patch({ lastDesignId: editId, index: itemIndex + 1 });
 
   // fillAndPublishDraft fires ITEM_STATUS and clicks Publish (or Skip) — both
   // navigate to the next design's /edit page, where this driver runs again.
   await fillAndPublishDraft(item);
+}
+
+/** Wait through TeePublic's post-GET-STARTED interstitial ("A little design
+ *  magic in progress…", "N of M designs ready for editing… you'll be redirected
+ *  in a moment") until the per-design edit UI mounts: the "Currently Editing
+ *  Design X of Y" label AND the title input are both present. */
+async function waitForBulkEditUI(timeoutMs: number): Promise<"ready" | "timeout"> {
+  const deadline = Date.now() + timeoutMs;
+  let lastLog = 0;
+  while (Date.now() < deadline) {
+    const raw = document.body.textContent ?? "";
+    const body = raw.toLowerCase();
+    const interstitial = /design magic in progress/.test(body) ||
+                         /redirected in a moment/.test(body) ||
+                         /designs ready for editing/.test(body);
+    const hasCounter = /currently editing design\s+\d+\s+of\s+\d+/i.test(raw);
+    const titleInput = document.querySelector('input[name="design[design_title]"]');
+    if (hasCounter && titleInput) return "ready";
+    if (interstitial && Date.now() - lastLog > 4_000) {
+      log("bulk: TeePublic preparing drafts (design magic in progress) — waiting for the edit page…");
+      lastLog = Date.now();
+    }
+    await sleep(500);
+  }
+  return "timeout";
+}
+
+/** Read TeePublic's "Currently Editing Design X of Y" progress label. */
+function readBulkDesignCounter(): { current: number; total: number } | null {
+  const m = /currently editing design\s+(\d+)\s+of\s+(\d+)/i.exec(document.body.textContent ?? "");
+  return m ? { current: parseInt(m[1], 10), total: parseInt(m[2], 10) } : null;
 }
 
 /** Fill ONE design on its /designs/<id>/edit page and Publish it. Publishing
