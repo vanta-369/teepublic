@@ -633,11 +633,12 @@ async function clickGetStarted(): Promise<void> {
   }
 }
 
-/** Wait until ALL dropped designs are uploaded AND processed into visible tiles
- *  before clicking GET STARTED. Clicking too early (upload <100% / 0 tiles)
- *  leaves TeePublic stuck at "0 of N designs ready for editing" forever, because
- *  there are no drafts to prepare. So proceed ONLY when BOTH hold:
- *    • upload progress is 100% / gone (no "UPLOADING… <100%"), AND
+/** Screen A (BEFORE Get Started). After dropping files, TeePublic first shows
+ *  the heading "Waiting for your designs to process" (no tiles, no Get Started —
+ *  only a Cancel link). Clicking Get Started during this leaves the bulk flow
+ *  stuck. So wait until ALL THREE hold:
+ *    • "Waiting for your designs to process" is GONE, AND
+ *    • the Get Started button (.jsBulkUploaderSubmit) is present AND visible, AND
  *    • the processed Cloudinary design tiles number >= the dispatched count.
  *  Returns false on timeout (images likely rejected as too small). */
 async function waitForBulkProcessingDone(expectedTiles: number, timeoutMs: number): Promise<boolean> {
@@ -647,30 +648,33 @@ async function waitForBulkProcessingDone(expectedTiles: number, timeoutMs: numbe
   let lastTiles = -1;
   while (Date.now() < deadline) {
     const body = (document.body.textContent ?? "").toLowerCase();
-    // The progress indicator only counts as "uploading" below 100% — NOT the
-    // permanent "Need help uploading?" link, and 100% means done.
+    const stillProcessing = body.includes("waiting for your designs to process");
+    // Upload progress only counts as "uploading" below 100% (100% = done; and
+    // NOT the permanent "Need help uploading?" link).
     const pctMatch = body.match(/uploading[.\s…]*(\d+)\s*%/);
     const uploadPct = pctMatch ? parseInt(pctMatch[1], 10) : null;
     const uploading = uploadPct !== null && uploadPct < 100;
     const tiles = countBulkTiles();
-    const getStarted = !!document.querySelector(".jsBulkUploaderSubmit") ||
-                       findByVisibleText("div", "Get Started") != null;
+    const gsEl = document.querySelector<HTMLElement>(".jsBulkUploaderSubmit");
+    const getStartedVisible = (!!gsEl && gsEl.getBoundingClientRect().width > 0) ||
+                              findByVisibleText("div", "Get Started") != null;
 
     if (uploadPct !== null && uploadPct !== lastPct) { lastPct = uploadPct; log(`bulk upload progress: ${uploadPct}%`); }
     if (tiles !== lastTiles) { lastTiles = tiles; log(`bulk: ${tiles}/${expectedTiles} design tile(s) processed`); }
-    if (Date.now() - lastProcLog > 5_000) {
-      log(`bulk: waiting for processing… upload=${uploadPct ?? "done"}% tiles=${tiles}/${expectedTiles}`);
+    if (stillProcessing && Date.now() - lastProcLog > 4_000) {
+      log("bulk: still processing uploads…");
       lastProcLog = Date.now();
     }
 
-    // BOTH conditions: upload finished AND every dispatched design has a tile.
-    if (getStarted && !uploading && expectedTiles > 0 && tiles >= expectedTiles) {
-      log(`bulk: processing done — ${tiles}/${expectedTiles} tile(s) visible, upload 100% — clicking Get Started`);
+    // ALL THREE: not processing, Get Started visible, every design has a tile.
+    if (!stillProcessing && !uploading && getStartedVisible && expectedTiles > 0 && tiles >= expectedTiles) {
+      log(`bulk: processing done — ${tiles}/${expectedTiles} tile(s), Get Started visible — clicking`);
       return true;
     }
     await sleep(500);
   }
-  log(`bulk: TIMEOUT — only ${countBulkTiles()}/${expectedTiles} design tile(s) processed (images may be too small / rejected) — aborting`);
+  const procTxt = (document.body.textContent ?? "").toLowerCase().includes("waiting for your designs to process");
+  log(`bulk: TIMEOUT — ${countBulkTiles()}/${expectedTiles} tile(s); "waiting to process" ${procTxt ? "STILL present" : "gone"} (images may be too small / rejected) — aborting`);
   return false;
 }
 
