@@ -633,88 +633,66 @@ async function clickGetStarted(): Promise<void> {
   }
 }
 
-/** Wait until ALL dropped designs are uploaded, processed, and VISIBLE before we
- *  click GET STARTED. On /designs/bulk_uploader there are two phases —
- *  "UPLOADING… N%" then "Waiting for your designs to process" — and only once
- *  they finish does TeePublic show the banner "…click GET STARTED to create your
- *  products" with all the design tiles. We proceed ONLY when:
- *    • neither "uploading" nor "waiting … to process" text is present, AND
- *    • the Get Started button is present, AND
- *    • the success banner shows OR all `expectedTiles` tiles are visible.
- *  Returns false on timeout. */
+/** Wait until ALL dropped designs are uploaded AND processed into visible tiles
+ *  before clicking GET STARTED. Clicking too early (upload <100% / 0 tiles)
+ *  leaves TeePublic stuck at "0 of N designs ready for editing" forever, because
+ *  there are no drafts to prepare. So proceed ONLY when BOTH hold:
+ *    • upload progress is 100% / gone (no "UPLOADING… <100%"), AND
+ *    • the processed Cloudinary design tiles number >= the dispatched count.
+ *  Returns false on timeout (images likely rejected as too small). */
 async function waitForBulkProcessingDone(expectedTiles: number, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   let lastProcLog = 0;
-  let lastPct = "";
-  let bannerSince = 0; // when the success banner first appeared (banner fallback)
+  let lastPct = -1;
+  let lastTiles = -1;
   while (Date.now() < deadline) {
     const body = (document.body.textContent ?? "").toLowerCase();
-    // Only the progress indicator counts as "uploading" — NOT the permanent
-    // "Need help uploading?" link, which would otherwise block us forever.
-    const uploading = /uploading[.\s…]*\d+\s*%/.test(body);
-    const processing = /waiting for your designs to process/.test(body);
-    // The success banner appears only once every design has finished processing.
-    const banner = /create your products/.test(body) || /you can add more files/.test(body);
+    // The progress indicator only counts as "uploading" below 100% — NOT the
+    // permanent "Need help uploading?" link, and 100% means done.
+    const pctMatch = body.match(/uploading[.\s…]*(\d+)\s*%/);
+    const uploadPct = pctMatch ? parseInt(pctMatch[1], 10) : null;
+    const uploading = uploadPct !== null && uploadPct < 100;
     const tiles = countBulkTiles();
     const getStarted = !!document.querySelector(".jsBulkUploaderSubmit") ||
                        findByVisibleText("div", "Get Started") != null;
 
-    if (uploading) {
-      const pct = body.match(/uploading[.\s…]*?(\d+)%/);
-      if (pct && pct[1] !== lastPct) { lastPct = pct[1]; log(`bulk upload progress: ${pct[1]}%`); }
-    }
-    if (processing && Date.now() - lastProcLog > 4_000) {
-      log(`bulk: designs still processing… waiting (${tiles}/${expectedTiles} tiles visible)`);
+    if (uploadPct !== null && uploadPct !== lastPct) { lastPct = uploadPct; log(`bulk upload progress: ${uploadPct}%`); }
+    if (tiles !== lastTiles) { lastTiles = tiles; log(`bulk: ${tiles}/${expectedTiles} design tile(s) processed`); }
+    if (Date.now() - lastProcLog > 5_000) {
+      log(`bulk: waiting for processing… upload=${uploadPct ?? "done"}% tiles=${tiles}/${expectedTiles}`);
       lastProcLog = Date.now();
     }
 
-    if (getStarted && !uploading && !processing) {
-      const allTilesVisible = expectedTiles > 0 && tiles >= expectedTiles;
-      if (allTilesVisible) {
-        // Best signal: every dropped design shows a tile — TeePublic is ready.
-        log(`bulk: processing done, ${tiles}/${expectedTiles} tile(s) visible — clicking Get Started`);
-        return true;
-      }
-      if (banner) {
-        // Fallback when tiles can't be detected: require the success banner to
-        // stay up a few seconds so we don't click before drafts truly exist
-        // (clicking too early leaves TeePublic stuck at "0 of N designs ready").
-        if (bannerSince === 0) bannerSince = Date.now();
-        else if (Date.now() - bannerSince >= 8_000) {
-          log(`bulk: processing done (banner stable, ${tiles}/${expectedTiles} tiles detected) — clicking Get Started`);
-          return true;
-        }
-      } else {
-        bannerSince = 0;
-      }
+    // BOTH conditions: upload finished AND every dispatched design has a tile.
+    if (getStarted && !uploading && expectedTiles > 0 && tiles >= expectedTiles) {
+      log(`bulk: processing done — ${tiles}/${expectedTiles} tile(s) visible, upload 100% — clicking Get Started`);
+      return true;
     }
     await sleep(500);
   }
-  log(`bulk: gave up waiting — tiles ${countBulkTiles()}/${expectedTiles}`);
+  log(`bulk: TIMEOUT — only ${countBulkTiles()}/${expectedTiles} design tile(s) processed (images may be too small / rejected) — aborting`);
   return false;
 }
 
-/** Best-effort count of uploaded-design preview tiles in the bulk uploader.
- *  Freshly-uploaded designs render as local blob:/data: image previews, so
- *  count those first; fall back to known tile class names, then CDN images. */
+/** Count the PROCESSED design tiles shown above GET STARTED. TeePublic renders
+ *  each finished upload as a Cloudinary thumbnail, so count visible
+ *  img[src*="cloudinary"] wider than 40px — that's the reliable "processing
+ *  done" signal (the upload % alone is not). Falls back to blob:/data: previews
+ *  and known tile classes. */
 function countBulkTiles(): number {
+  const cloud = Array.from(document.querySelectorAll<HTMLImageElement>('img[src*="cloudinary"]'))
+    .filter((im) => im.getBoundingClientRect().width > 40);
+  if (cloud.length > 0) return cloud.length;
   const previews = Array.from(document.querySelectorAll<HTMLImageElement>("img")).filter((im) => {
     const r = im.getBoundingClientRect();
-    return r.width > 20 && r.height > 20 && /^blob:|^data:image/i.test(im.src);
+    return r.width > 40 && r.height > 20 && /^blob:|^data:image|amazonaws|cloudfront/i.test(im.src);
   });
   if (previews.length > 0) return previews.length;
-  const sels = [
-    ".jsBulkUploaderDesign",
-    '[class*="bulk-uploader__design" i]',
-    '[class*="uploaded-design" i]',
-    '[class*="design-tile" i]',
-    '[class*="design-preview" i]',
-  ];
-  for (const s of sels) {
+  for (const s of ['.jsBulkUploaderDesign', '[class*="bulk-uploader__design" i]', '[class*="uploaded-design" i]', '[class*="design-tile" i]']) {
     const n = document.querySelectorAll(s).length;
     if (n > 0) return n;
   }
-  return document.querySelectorAll('img[src*="amazonaws"], img[src*="cloudfront"]').length;
+  return 0;
 }
 
 /** Resume an active bulk run on whatever page this content script loaded on:
@@ -803,6 +781,8 @@ async function maybeDriveBulkEditPage(): Promise<void> {
  *  shows. Returns false on timeout. */
 async function waitForBulkRedirectToEdit(timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
+  let lastReady = -1;
+  let lastReadyChangeAt = Date.now();
   while (Date.now() < deadline) {
     const raw = document.body.textContent ?? "";
     // End ONLY when TeePublic has redirected to the per-design edit page.
@@ -811,8 +791,17 @@ async function waitForBulkRedirectToEdit(timeoutMs: number): Promise<boolean> {
     const hasCurrentlyEditing = /currently editing design/i.test(raw);
     if (onEdit && titleInput && hasCurrentlyEditing) return true;
 
-    // Still preparing drafts — keep waiting (never fill/re-click/abort here).
-    const m = raw.match(/\d+\s+of\s+\d+\s+designs?\s+ready\s+for\s+editing/i);
+    // Still preparing drafts — keep waiting (never fill/re-click here).
+    const m = raw.match(/(\d+)\s+of\s+(\d+)\s+designs?\s+ready\s+for\s+editing/i);
+    const ready = m ? parseInt(m[1], 10) : -1;
+    if (ready !== lastReady) { lastReady = ready; lastReadyChangeAt = Date.now(); }
+    // Stuck guard: the "N of M" count not advancing (esp. stuck at "0 of M") for
+    // >90s means the drafts never became ready — clicked Get Started too early
+    // or the images were rejected. Abort rather than spin to the full timeout.
+    if (ready >= 0 && Date.now() - lastReadyChangeAt > 90_000) {
+      log(`bulk: stuck at "${m![0].trim()}" for 90s — designs never became ready (Get Started too early or images rejected) — aborting`);
+      return false;
+    }
     const text = m ? m[0].trim() : (/redirected in a moment/i.test(raw) ? "redirected in a moment" : "");
     log(text ? `bulk: preparing… "${text}"` : "bulk: waiting for redirect to the edit page…");
     await sleep(1_000);
