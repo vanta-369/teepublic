@@ -646,6 +646,7 @@ async function waitForBulkProcessingDone(expectedTiles: number, timeoutMs: numbe
   const deadline = Date.now() + timeoutMs;
   let lastProcLog = 0;
   let lastPct = "";
+  let bannerSince = 0; // when the success banner first appeared (banner fallback)
   while (Date.now() < deadline) {
     const body = (document.body.textContent ?? "").toLowerCase();
     // Only the progress indicator counts as "uploading" — NOT the permanent
@@ -667,10 +668,25 @@ async function waitForBulkProcessingDone(expectedTiles: number, timeoutMs: numbe
       lastProcLog = Date.now();
     }
 
-    const allTilesVisible = expectedTiles > 0 && tiles >= expectedTiles;
-    if (getStarted && !uploading && !processing && (banner || allTilesVisible)) {
-      log(`bulk: processing done, ${tiles}/${expectedTiles} tile(s) visible — clicking Get Started`);
-      return true;
+    if (getStarted && !uploading && !processing) {
+      const allTilesVisible = expectedTiles > 0 && tiles >= expectedTiles;
+      if (allTilesVisible) {
+        // Best signal: every dropped design shows a tile — TeePublic is ready.
+        log(`bulk: processing done, ${tiles}/${expectedTiles} tile(s) visible — clicking Get Started`);
+        return true;
+      }
+      if (banner) {
+        // Fallback when tiles can't be detected: require the success banner to
+        // stay up a few seconds so we don't click before drafts truly exist
+        // (clicking too early leaves TeePublic stuck at "0 of N designs ready").
+        if (bannerSince === 0) bannerSince = Date.now();
+        else if (Date.now() - bannerSince >= 8_000) {
+          log(`bulk: processing done (banner stable, ${tiles}/${expectedTiles} tiles detected) — clicking Get Started`);
+          return true;
+        }
+      } else {
+        bannerSince = 0;
+      }
     }
     await sleep(500);
   }
@@ -678,12 +694,18 @@ async function waitForBulkProcessingDone(expectedTiles: number, timeoutMs: numbe
   return false;
 }
 
-/** Best-effort count of uploaded-design preview tiles in the bulk uploader. */
+/** Best-effort count of uploaded-design preview tiles in the bulk uploader.
+ *  Freshly-uploaded designs render as local blob:/data: image previews, so
+ *  count those first; fall back to known tile class names, then CDN images. */
 function countBulkTiles(): number {
+  const previews = Array.from(document.querySelectorAll<HTMLImageElement>("img")).filter((im) => {
+    const r = im.getBoundingClientRect();
+    return r.width > 20 && r.height > 20 && /^blob:|^data:image/i.test(im.src);
+  });
+  if (previews.length > 0) return previews.length;
   const sels = [
     ".jsBulkUploaderDesign",
     '[class*="bulk-uploader__design" i]',
-    '[class*="bulk_uploader_design" i]',
     '[class*="uploaded-design" i]',
     '[class*="design-tile" i]',
     '[class*="design-preview" i]',
@@ -692,7 +714,7 @@ function countBulkTiles(): number {
     const n = document.querySelectorAll(s).length;
     if (n > 0) return n;
   }
-  return document.querySelectorAll('img[src^="blob:"], img[src^="data:image"], img[src*="amazonaws"], img[src*="cloudfront"]').length;
+  return document.querySelectorAll('img[src*="amazonaws"], img[src*="cloudfront"]').length;
 }
 
 /** Resume an active bulk run on whatever page this content script loaded on:
