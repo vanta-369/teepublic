@@ -733,14 +733,12 @@ async function maybeResumeBulk(): Promise<void> {
   }
 
   if (/\/designs\/bulk_uploader/.test(location.href)) {
-    const body = document.body.textContent ?? "";
-    const interstitial = /\d+\s+of\s+\d+\s+designs?\s+ready\s+for\s+editing/i.test(body) ||
-                         /redirected in a moment/i.test(body);
-    if (!interstitial) {
-      log('bulk[resume]: on bulk_uploader but no "designs ready / redirected" interstitial yet — idle');
-      return; // not the post-Get-Started preparing state
-    }
-    log('bulk[resume]: on the "designs ready for editing" interstitial → waiting for the edit-page redirect…');
+    // An ACTIVE run while on bulk_uploader means GET STARTED was clicked (the
+    // run is only persisted right before the click) or we reloaded onto the
+    // "N of M designs ready… redirected" interstitial. Either way, POLL for the
+    // edit-page redirect — don't check the interstitial text once, because it
+    // renders a moment after the click (that race left us idle before).
+    log("bulk[resume]: active run on bulk_uploader → polling for the edit-page redirect…");
     const redirected = await waitForBulkRedirectToEdit(120_000);
     if (redirected) await maybeDriveBulkEditPage();
     else {
