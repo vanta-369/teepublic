@@ -202,7 +202,7 @@ async function runUpload(
       // otherwise wastes a daily upload slot. Skip too-small files up front.
       const dim = await imageDimensions(imageDataUrl);
       if (dim && isBelowMinSize(dim)) {
-        const err = `skipped ${m.filename}: ${dim.w}×${dim.h} below TeePublic minimum ${MIN_SHORT_SIDE}×${MIN_LONG_SIDE}`;
+        const err = `skipped ${m.filename}: ${dim.w}×${dim.h} below TeePublic minimum ${MIN_WIDTH} wide × ${MIN_HEIGHT} tall`;
         log(err);
         fireItemStatus(item.id, "failed", undefined, err);
         return { ok: false, error: err };
@@ -581,7 +581,7 @@ async function runBulkDispatch(
     const it = items[i];
     const dim = await imageDimensions(imageDataUrls[i]);
     if (dim && isBelowMinSize(dim)) {
-      const err = `skipped ${it.metadata.filename}: ${dim.w}×${dim.h} below TeePublic minimum ${MIN_SHORT_SIDE}×${MIN_LONG_SIDE}`;
+      const err = `skipped ${it.metadata.filename}: ${dim.w}×${dim.h} below TeePublic minimum ${MIN_WIDTH} wide × ${MIN_HEIGHT} tall`;
       log(err);
       fireItemStatus(it.id, "failed", undefined, err);
       continue;
@@ -1055,10 +1055,13 @@ function pageShowsText(rx: RegExp): boolean {
   return false;
 }
 
-// TeePublic rejects artwork below this; pre-checking avoids the failed-upload
-// cascade. Orientation-agnostic so a valid landscape design isn't false-skipped.
-const MIN_SHORT_SIDE = 1500;
-const MIN_LONG_SIDE = 1995;
+// TeePublic requires artwork at least 1500 px WIDE and 1995 px TALL (portrait
+// minimum). Orientation MATTERS: a wide/landscape design (e.g. 1995×1500
+// typography) has enough total pixels but is too SHORT, so TeePublic rejects it
+// with "needs a transparent PNG ≥ 1500×1995px". Pre-checking width & height
+// separately flags those up front instead of wasting an upload attempt.
+const MIN_WIDTH = 1500;
+const MIN_HEIGHT = 1995;
 
 /** Read an image's pixel dimensions from a data/URL. Null if it can't load. */
 function imageDimensions(src: string): Promise<{ w: number; h: number } | null> {
@@ -1070,8 +1073,10 @@ function imageDimensions(src: string): Promise<{ w: number; h: number } | null> 
   });
 }
 
+/** True if the image is too small for TeePublic: needs width ≥ 1500 AND
+ *  height ≥ 1995 (portrait). Landscape/too-short designs are rejected. */
 function isBelowMinSize(d: { w: number; h: number }): boolean {
-  return Math.min(d.w, d.h) < MIN_SHORT_SIDE || Math.max(d.w, d.h) < MIN_LONG_SIDE;
+  return d.w < MIN_WIDTH || d.h < MIN_HEIGHT;
 }
 
 /** Wait for the current design's edit form to be ready, OR detect that
