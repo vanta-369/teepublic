@@ -231,6 +231,12 @@ async function runUpload(
     // exist yet). Block until ALL of them are present.
     await waitForFormReady();
 
+    // Do NOT start the listing until the artwork upload is FULLY finished —
+    // i.e. TeePublic has done processing and the product color table has
+    // rendered. Otherwise we begin typing while the design is still uploading.
+    await waitForArtworkProcessingDone();
+    log("artwork fully uploaded + processed — starting the listing");
+
     // Field order matches the page: Title → Description → Main Tag → Supporting Tags.
 
     // ── 2. Design Title ─────────────────────────────────────────────────
@@ -398,10 +404,10 @@ async function runUpload(
       log(`mature radio not selected — skipping: ${(e as Error).message}`);
     }
 
-    // ── 6.5. Wait for processing/checking-artwork to clear, then product
-    //         table colors (per color.md). DO NOT touch the Product Colors
-    //         palette — leave it at default.
-    await waitForArtworkProcessingDone();
+    // ── 6.5. Product table colors (per color.md). Artwork processing was
+    //         already confirmed done BEFORE the listing was filled, so the
+    //         table is present. DO NOT touch the Product Colors palette —
+    //         leave it at default.
 
     // Honor the Excel "products" sheet — toggle OFF any apparel row the user
     // disabled (and toggle ON anything they enabled that the page defaulted off).
