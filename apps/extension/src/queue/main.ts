@@ -1,6 +1,6 @@
 import type { QueueBatch, QueueItem } from "@teepublic/shared";
 import { QueueStore, ImageStore } from "../services/queueStore";
-import { buildBatchExport, applyBatchImport } from "../services/batchTransfer";
+import { buildBatchExportChunks, applyBatchImport } from "../services/batchTransfer";
 
 function $(id: string) { return document.getElementById(id) as HTMLElement; }
 
@@ -113,25 +113,32 @@ async function init() {
   ($("file-import") as HTMLInputElement).onchange = importBatch;
 }
 
-/** Save the whole batch (listings + colors + images) to a JSON file the user
- *  can carry to another Chrome profile. */
+/** Save the batch (listings + colors + images) to JSON files the user can carry
+ *  to another Chrome profile — CHUNKED at 30 designs per file so a single string
+ *  never exceeds JavaScript's ~512 MB limit ("Invalid string length"). */
 async function exportBatch(): Promise<void> {
   const btn = $("btn-export") as HTMLButtonElement;
   const label = btn.textContent;
   btn.disabled = true;
   btn.textContent = "Exporting…";
   try {
-    const data = await buildBatchExport();
-    const blob = new Blob([JSON.stringify(data)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
+    const chunks = await buildBatchExportChunks();
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
-    a.href = url;
-    a.download = `teepublic-batch-${data.batch.items.length}-designs-${stamp}.json`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+    for (const chunk of chunks) {
+      const blob = new Blob([JSON.stringify(chunk)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `teepublic-batch-part${chunk.part}of${chunk.totalParts}-${chunk.batch.items.length}designs-${stamp}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      await new Promise((r) => setTimeout(r, 400)); // let each download start
+    }
+    if (chunks.length > 1) {
+      alert(`Exported ${chunks.length} files (30 designs each). Import ALL of them on the other profile — they merge into one queue.`);
+    }
   } catch (e) {
     alert(e instanceof Error ? e.message : "Export failed.");
   } finally {
@@ -140,23 +147,33 @@ async function exportBatch(): Promise<void> {
   }
 }
 
-/** Load a batch exported from another profile into this profile's queue. */
+/** Load one or more exported chunk files into this profile's queue. Files MERGE
+ *  (dedup by id), so selecting all parts at once — or importing them one by one —
+ *  rebuilds the whole batch. Use "Clear queue" first to start fresh. */
 async function importBatch(ev: Event): Promise<void> {
   const input = ev.target as HTMLInputElement;
-  const file = input.files?.[0];
-  input.value = ""; // allow re-importing the same file later
-  if (!file) return;
+  const files = Array.from(input.files ?? []);
+  input.value = ""; // allow re-importing the same files later
+  if (files.length === 0) return;
 
-  if (!confirm(`Import "${file.name}"? This replaces the current queue.`)) return;
-
-  try {
-    const data = JSON.parse(await file.text());
-    const { items, images } = await applyBatchImport(data);
-    render(await QueueStore.get());
-    alert(`Imported ${items} design(s) (${images} image(s)). Review your selection, then press Start.`);
-  } catch (e) {
-    alert(e instanceof Error ? `Import failed: ${e.message}` : "Import failed.");
+  let totalItems = 0;
+  let totalImages = 0;
+  const errors: string[] = [];
+  // Sort by "partNof M" in the filename so chunks import in order.
+  files.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  for (const file of files) {
+    try {
+      const data = JSON.parse(await file.text());
+      const { items, images } = await applyBatchImport(data);
+      totalItems += items;
+      totalImages += images;
+    } catch (e) {
+      errors.push(`${file.name}: ${e instanceof Error ? e.message : "failed"}`);
+    }
   }
+  render(await QueueStore.get());
+  const summary = `Imported ${totalItems} design(s) (${totalImages} image(s)) from ${files.length} file(s).`;
+  alert(errors.length ? `${summary}\n\nSkipped:\n${errors.join("\n")}` : `${summary} Review your selection, then press Start.`);
 }
 
 init();
