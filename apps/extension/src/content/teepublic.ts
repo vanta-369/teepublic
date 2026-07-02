@@ -227,15 +227,18 @@ async function runUpload(
     // ── 1b. Wait until the design is 100% loaded ────────────────────────
     // TeePublic renders the form fields + Item table + Configure Other Products
     // PROGRESSIVELY as the file uploads/processes. Trying to fill anything
-    // before that produces phantom failures (textareas / rows that don't
-    // exist yet). Block until ALL of them are present.
+    // before that produces phantom/scrambled fields.
+    //
+    // GATE 1: never fill while the artwork is still UPLOADING. TeePublic shows
+    // "UPLOADING… N%" as page text and renders the form *before* the upload
+    // finishes — so we must block until it reaches 100% (or the indicator is
+    // gone), otherwise the title gets typed at e.g. 38%.
+    await waitForUploadComplete();
+    // GATE 2: form fields mounted (Change Artwork + Title input).
     await waitForFormReady();
-
-    // Do NOT start the listing until the artwork upload is FULLY finished —
-    // i.e. TeePublic has done processing and the product color table has
-    // rendered. Otherwise we begin typing while the design is still uploading.
+    // GATE 3: artwork fully processed — product color table rendered.
     await waitForArtworkProcessingDone();
-    log("artwork fully uploaded + processed — starting the listing");
+    log("artwork 100% uploaded + processed — starting the listing");
 
     // Field order matches the page: Title → Description → Main Tag → Supporting Tags.
 
@@ -1047,6 +1050,26 @@ async function waitForUploadOutcome(timeoutMs: number): Promise<"ok" | "failed" 
     await sleep(400);
   }
   return "timeout";
+}
+
+/** Block until the artwork upload reaches 100% (or its "UPLOADING… N%" indicator
+ *  disappears). TeePublic renders the edit form BEFORE the upload finishes, so
+ *  without this the listing gets typed mid-upload (e.g. at 38%) → scrambled /
+ *  partial fields. Treats anything < 100% as "not ready — wait". */
+async function waitForUploadComplete(timeoutMs = 120_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastPct = -1;
+  while (Date.now() < deadline) {
+    if (isPublishedListingUrl(location.href)) return; // already published — nothing to wait for
+    const body = document.body.textContent ?? "";
+    const m = body.match(/uploading[…\.\s]*?(\d+)\s*%/i);
+    if (!m) return;                       // no "UPLOADING… N%" indicator → upload not in progress
+    const pct = parseInt(m[1], 10);
+    if (pct >= 100) return;               // reached 100%
+    if (pct !== lastPct) { lastPct = pct; log(`bulk: artwork uploading… ${pct}% — waiting`); }
+    await sleep(500);
+  }
+  log(`bulk: upload-complete wait exceeded ${Math.round(timeoutMs / 1000)}s — proceeding`);
 }
 
 /** True if a small, visible element on the page contains text matching `rx`. */
