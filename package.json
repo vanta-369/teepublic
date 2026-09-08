@@ -9,6 +9,7 @@
   ],
   "scripts": {
     "dev:dashboard": "npm run dev --workspace=@teepublic/dashboard",
+    "dev:dashboard:turbo": "npm run dev:turbo --workspace=@teepublic/dashboard",
     "dev:extension": "npm run dev --workspace=@teepublic/extension",
     "build:extension": "npm run build --workspace=@teepublic/extension",
     "build:dashboard": "npm run build --workspace=@teepublic/dashboard"

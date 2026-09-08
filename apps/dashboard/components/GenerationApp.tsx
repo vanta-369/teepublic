@@ -11,6 +11,7 @@ import { loadDesigns, saveDesigns, type PersistedDesign } from "@/lib/designsSto
 import { uploadDesignImage } from "@/lib/uploadImage";
 import { expandDroppedFiles } from "@/lib/zip";
 import { getGeminiKey, setGeminiKey, getGeminiModel, setGeminiModel, getGeminiPrompt, setGeminiPrompt } from "@/lib/aiSettings";
+import { assertCanGenerate, logGeneration, GenerationBlockedError } from "@/lib/access.client";
 import type { ColorProductConfigValue } from "./ColorProductConfig";
 import { allEnabledProducts, applyPreset, type ColorPreset } from "@/lib/colorPresets";
 import { loadCustomBasicColors, saveCustomBasicColors, type CustomBasicColor } from "@/lib/batchConfig";
@@ -252,6 +253,15 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
     if (images.length === 0) { setError("Add at least one design image."); return; }
     if (!prompt.trim()) { setError("Add a prompt describing the theme."); return; }
 
+    // Live access gate BEFORE any Gemini request (fail closed if unreachable).
+    try {
+      await assertCanGenerate();
+    } catch (e) {
+      if (e instanceof GenerationBlockedError) { void logGeneration("denied", { status: e.status }); }
+      setError((e as Error).message);
+      return;
+    }
+
     abortRef.current?.abort();
     const ac = new AbortController();
     abortRef.current = ac;
@@ -266,6 +276,9 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
       if (ac.signal.aborted) break;
       const img = images[i];
       try {
+        // Re-check access between items — a trial can expire or an admin can
+        // suspend mid-batch; catch it at the next item, never from a cache.
+        await assertCanGenerate();
         const base64 = await ensureBase64(img);
         const listing = await generateListing({
           apiKey,
@@ -275,11 +288,22 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
           model,
           signal: ac.signal,
         });
+        void logGeneration("success", { model, imageId: img.id });
         setDesigns((prev) => prev.map((d) =>
           d.image.id === img.id ? { ...d, listing, status: "ready" } : d
         ));
       } catch (e) {
         if (ac.signal.aborted) break;
+        // Access revoked mid-batch: stop the whole run, don't keep hitting Gemini.
+        if (e instanceof GenerationBlockedError) {
+          void logGeneration("denied", { status: e.status, imageId: img.id });
+          setError((e as Error).message);
+          setDesigns((prev) => prev.map((d) =>
+            d.status === "generating" ? { ...d, status: "error", error: (e as Error).message } : d
+          ));
+          break;
+        }
+        void logGeneration("failed", { model, imageId: img.id, message: (e as Error).message });
         setDesigns((prev) => prev.map((d) =>
           d.image.id === img.id ? { ...d, status: "error", error: (e as Error).message } : d
         ));
@@ -344,6 +368,17 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
       return;
     }
     setError(null);
+    // Live access gate before the (single) Gemini request.
+    try {
+      await assertCanGenerate();
+    } catch (e) {
+      if (e instanceof GenerationBlockedError) { void logGeneration("denied", { status: e.status, imageId: id }); }
+      setError((e as Error).message);
+      setDesigns((prev) => prev.map((d) =>
+        d.image.id === id ? { ...d, status: "error", error: (e as Error).message } : d
+      ));
+      return;
+    }
     setDesigns((prev) => prev.map((d) =>
       d.image.id === id ? { ...d, status: "generating", error: undefined } : d
     ));
@@ -356,10 +391,12 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
         imageMime: target.image.mime,
         model,
       });
+      void logGeneration("success", { model, imageId: id });
       setDesigns((prev) => prev.map((d) =>
         d.image.id === id ? { ...d, listing, status: "ready" } : d
       ));
     } catch (e) {
+      void logGeneration("failed", { model, imageId: id, message: (e as Error).message });
       setDesigns((prev) => prev.map((d) =>
         d.image.id === id ? { ...d, status: "error", error: (e as Error).message } : d
       ));

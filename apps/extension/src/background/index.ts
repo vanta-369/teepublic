@@ -3,12 +3,34 @@
 //   2. Persist queue + settings via QueueStore.
 //   3. Drive the AutomationEngine.
 
-import type { DashboardToExtensionMessage } from "@teepublic/shared";
+import type { DashboardToExtensionMessage, QueueStateData } from "@teepublic/shared";
 import type { QueueBatch } from "@teepublic/shared";
-import { QueueStore, SettingsStore, ImageStore } from "../services/queueStore";
+import { QueueStore, SettingsStore, clearAllImageData, storeImageWithThumbnail } from "../services/queueStore";
 import { engine } from "../services/automationEngine";
+import { assertCanAccess, AccessDeniedError } from "../lib/access";
 
 console.info("[teepublic] background ready");
+
+// Open the side panel when the toolbar icon is clicked (the UI is now a side
+// panel, not a popup). Guarded so older Chrome without sidePanel won't throw.
+chrome.sidePanel
+  ?.setPanelBehavior?.({ openPanelOnActionClick: true })
+  .catch((e) => console.warn("[teepublic] sidePanel setPanelBehavior failed", e));
+
+// Live access gate for every message that STARTS automation. Always queries
+// get_my_access() — no cached plan/status, no extension-storage entitlement.
+// The DB is the source of truth; if we can't confirm access, we deny.
+async function guardAccess(): Promise<{ ok: true } | { ok: false; error: string; status?: string }> {
+  try {
+    await assertCanAccess();
+    return { ok: true };
+  } catch (e) {
+    if (e instanceof AccessDeniedError) {
+      return { ok: false, error: `access denied: ${e.status}`, status: e.status };
+    }
+    return { ok: false, error: `access check failed: ${(e as Error).message}` };
+  }
+}
 
 // Self-heal: any items left "running" from a previous SW lifetime get reset to
 // "queued" so the next Start picks them up. Runs on every SW wake-up.
@@ -35,7 +57,7 @@ chrome.runtime.onInstalled.addListener(async () => {
   await SettingsStore.set({});
 });
 
-// Messages from the localhost dashboard.
+// Messages from the Higgstee dashboard (see externally_connectable).
 chrome.runtime.onMessageExternal.addListener((message: DashboardToExtensionMessage, sender, sendResponse) => {
   (async () => {
     try {
@@ -56,19 +78,58 @@ chrome.runtime.onMessageExternal.addListener((message: DashboardToExtensionMessa
           // exceeds Chrome's 64 MiB cap. Store each under its OWN key — NOT in
           // the batch — so we never rewrite all images when one arrives (that
           // O(N²) rewrite was filling storage → FILE_ERROR_NO_SPACE).
-          await ImageStore.set(message.itemId, message.imageUrl);
+          //
+          // This also generates the design's small grid preview, HERE in the
+          // worker rather than in whichever page happens to be showing the
+          // queue. The original is stored untouched — the preview is an extra
+          // file. Awaited (not fire-and-forget) so the dashboard's sequential
+          // send paces generation and the worker can't be suspended mid-encode.
+          await storeImageWithThumbnail(message.itemId, message.imageUrl);
           return sendResponse({ ok: true });
 
-        case "QUEUE_START":
+        case "QUEUE_START": {
+          const g = await guardAccess();
+          if (!g.ok) return sendResponse(g);
           await engine.start();
           return sendResponse({ ok: true });
+        }
 
         case "QUEUE_PAUSE":
           await engine.pause();
           return sendResponse({ ok: true });
 
-        case "ITEM_RETRY":
+        case "ITEM_RETRY": {
+          const g = await guardAccess();
+          if (!g.ok) return sendResponse(g);
           await engine.retry(message.itemId);
+          return sendResponse({ ok: true });
+        }
+
+        // Read-back for the dashboard's Uploads page, which mirrors this queue.
+        // Metadata only — item.imageUrl is already "" in the stored batch and
+        // the (multi-MB base64) images stay in ImageStore.
+        case "QUEUE_STATE": {
+          const batch = await QueueStore.get();
+          const settings = await SettingsStore.get();
+          const data: QueueStateData = {
+            batch: batch ? { ...batch, items: batch.items.map((i) => ({ ...i, imageUrl: "" })) } : null,
+            paused: settings.paused === true,
+            engine: engine.getState(),
+          };
+          return sendResponse({ ok: true, data });
+        }
+
+        case "QUEUE_ITEM_TOGGLE":
+          await toggleItemSelected(message.itemId);
+          return sendResponse({ ok: true });
+
+        case "QUEUE_SELECT_ALL":
+          await setAllSelected(message.value === true);
+          return sendResponse({ ok: true });
+
+        case "QUEUE_CLEAR":
+          await QueueStore.set(null);
+          await clearAllImageData();
           return sendResponse({ ok: true });
 
         default:
@@ -85,15 +146,31 @@ chrome.runtime.onMessageExternal.addListener((message: DashboardToExtensionMessa
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   (async () => {
     switch (message?.type) {
-      case "ENGINE_START":          await engine.start(); return sendResponse({ ok: true });
+      case "ENGINE_START": {
+        const g = await guardAccess();
+        if (!g.ok) return sendResponse(g);
+        await engine.start();
+        return sendResponse({ ok: true });
+      }
       case "ENGINE_PAUSE":          await engine.pause(); return sendResponse({ ok: true });
-      case "ITEM_RETRY":            await engine.retry(message.itemId); return sendResponse({ ok: true });
+      // Live access gate for the bulk content script, which self-drives across
+      // page loads OUTSIDE the engine loop. It asks here on every page so the
+      // service worker (not the page context) does the Supabase check. Fail-safe:
+      // any error → not ok. Mirrors guardAccess used by ENGINE_START.
+      case "ASSERT_ACCESS":         return sendResponse(await guardAccess());
+      case "ITEM_RETRY": {
+        const g = await guardAccess();
+        if (!g.ok) return sendResponse(g);
+        await engine.retry(message.itemId);
+        return sendResponse({ ok: true });
+      }
       case "ITEM_TOGGLE_SELECTED":  await toggleItemSelected(message.itemId); return sendResponse({ ok: true });
       case "ITEMS_SELECT_ALL":      await setAllSelected(message.value === true); return sendResponse({ ok: true });
       case "ITEMS_INVERT_SELECTED": await invertAllSelected(); return sendResponse({ ok: true });
+      case "ITEMS_SET_SELECTED_MAP": await setSelectedMap(message.updates); return sendResponse({ ok: true });
       case "ITEM_STATUS":           await handleItemStatus(message.itemId, message.status, message.publishedUrl, message.error); return sendResponse({ ok: true });
       case "PUBLISHED_URL_DETECTED": await handlePublishedUrlDetected(message.url); return sendResponse({ ok: true });
-      case "QUEUE_CLEAR":           await QueueStore.set(null); await ImageStore.clearAll(); return sendResponse({ ok: true });
+      case "QUEUE_CLEAR":           await QueueStore.set(null); await clearAllImageData(); return sendResponse({ ok: true });
       default:                      return sendResponse({ ok: false, error: "unknown message" });
     }
   })();
@@ -172,6 +249,23 @@ async function handleItemStatus(
 
   // Storage change broadcasts QUEUE_STATE_UPDATE automatically (popup +
   // queue page subscribe via chrome.storage.onChanged).
+}
+
+// Apply a page-scoped selection change (Select page / Invert page from the side
+// panel): set item.selected for each listed id. Serialized through the store
+// like every other selection mutation.
+async function setSelectedMap(updates: Array<{ id: string; selected: boolean }>): Promise<void> {
+  const batch = await QueueStore.get();
+  if (!batch || !Array.isArray(updates)) return;
+  const map = new Map(updates.map((u) => [u.id, u.selected]));
+  const now = Date.now();
+  for (const item of batch.items) {
+    if (map.has(item.id)) {
+      item.selected = map.get(item.id)!;
+      item.updatedAt = now;
+    }
+  }
+  await QueueStore.set(batch);
 }
 
 async function invertAllSelected(): Promise<void> {

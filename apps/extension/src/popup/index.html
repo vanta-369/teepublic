@@ -16,6 +16,23 @@
     </div>
   </header>
 
+  <section id="auth" class="auth">
+    <form id="auth-form" class="auth-form" hidden>
+      <input id="auth-email" type="email" placeholder="Email" autocomplete="username" required />
+      <input id="auth-pass" type="password" placeholder="Password" autocomplete="current-password" required />
+      <button id="auth-signin" type="submit" class="primary small">Sign in</button>
+      <p id="auth-error" class="auth-error"></p>
+    </form>
+    <div id="auth-status" class="auth-status" hidden>
+      <span id="auth-badge" class="badge"></span>
+      <span id="auth-email-label" class="muted-sm"></span>
+      <span class="auth-spacer"></span>
+      <a id="auth-upgrade" class="small" target="_blank" rel="noopener" hidden>Upgrade</a>
+      <button id="auth-signout" class="small">Sign out</button>
+    </div>
+    <p id="auth-note" class="muted-sm" hidden></p>
+  </section>
+
   <section class="stats">
     <div><span class="label">Total</span><span id="s-total" class="stat">0</span></div>
     <div><span class="label">Picked</span><span id="s-picked" class="stat info">0</span></div>
@@ -41,7 +58,7 @@
     <button id="btn-clear" class="danger">Clear</button>
   </section>
 
-  <p id="empty" class="empty">No queue yet. Send one from the dashboard at <code>localhost:3030</code>.</p>
+  <p id="empty" class="empty">No queue yet. Send one from the dashboard at <code>higgstee.com</code>.</p>
 
   <script type="module" src="main.js"></script>
 </body>

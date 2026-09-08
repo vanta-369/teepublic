@@ -13,3 +13,7 @@ apps/dashboard/out
 apps/dashboard/uploads
 apps/dashboard/.auth
 *.tsbuildinfo
+
+# Vendored/dev tooling and stray archives — not part of the product.
+*.rar
+.superpowers/

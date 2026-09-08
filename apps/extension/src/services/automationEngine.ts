@@ -6,6 +6,7 @@
 import type { QueueItem } from "@teepublic/shared";
 import { QueueStore, SettingsStore, BulkLogStore, ImageStore, BulkStateStore } from "./queueStore";
 import { humanDelay } from "../lib/delays";
+import { assertCanAccess, AccessDeniedError } from "../lib/access";
 
 type EngineState = "idle" | "running" | "paused" | "stopped";
 
@@ -21,6 +22,9 @@ class AutomationEngine {
 
   async start() {
     if (this.state === "running") return;
+    // NOTE: access is enforced authoritatively at the top of each loop() pass
+    // (below) and at the message boundary in background/index.ts. No item can
+    // run before that live check passes.
     await SettingsStore.set({ paused: false });
     // Reset any items left in "running" (service worker was suspended mid-run,
     // browser closed, etc.) — without this, the loop would skip them forever.
@@ -39,11 +43,34 @@ class AutomationEngine {
 
   async retry(itemId: string) {
     await QueueStore.setItemStatus(itemId, "pending", { lastError: undefined });
-    if (this.state !== "running") void this.start();
+    if (this.state !== "running") void this.start(); // loop() re-checks access
+  }
+
+  // Live access gate. Returns true if automation may proceed. On denial (or any
+  // failure to confirm access) it pauses the engine and logs — fail SAFE: if we
+  // can't confirm with the database, we do not run. The DB is the only truth.
+  private async ensureAccess(): Promise<boolean> {
+    try {
+      await assertCanAccess();
+      return true;
+    } catch (e) {
+      const reason = e instanceof AccessDeniedError ? e.status : (e as Error).message;
+      await SettingsStore.set({ paused: true });
+      this.state = "paused";
+      BulkLogStore.append(`automation stopped — access denied (${reason}). Sign in / upgrade in the extension popup.`);
+      console.warn(`[teepublic] automation blocked: ${reason}`);
+      // Best-effort notify an open popup/queue page; ignore "no receiver".
+      try { chrome.runtime.sendMessage({ type: "ACCESS_LOCKED", status: reason }, () => void chrome.runtime.lastError); } catch { /* no listener */ }
+      return false;
+    }
   }
 
   private async loop() {
     while (true) {
+      // Re-check on EVERY item — a trial can expire or an admin can suspend
+      // mid-run, and we must catch it at the next boundary, not from a cache.
+      if (!(await this.ensureAccess())) return;
+
       const settings = await SettingsStore.get();
       if (settings.paused) { this.state = "paused"; return; }
 

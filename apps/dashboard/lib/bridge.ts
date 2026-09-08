@@ -2,7 +2,12 @@
 // using chrome.runtime.sendMessage(extensionId, msg).
 // The extension's manifest.json declares this origin in "externally_connectable".
 
-import type { DashboardToExtensionMessage, ExtensionToDashboardResponse, QueueBatch } from "@teepublic/shared";
+import type {
+  DashboardToExtensionMessage,
+  ExtensionToDashboardResponse,
+  QueueBatch,
+  QueueStateData,
+} from "@teepublic/shared";
 
 // Minimal shape of the chrome.runtime API we use. Declared locally (not as a
 // global Window augmentation) to avoid colliding with @types/chrome, which is
@@ -22,6 +27,7 @@ function chromeRuntime(): ChromeRuntime | undefined {
 }
 
 const STORAGE_KEY = "teepublic.extensionId";
+const THUMBS_KEY = "teepublic.queueThumbs";
 
 export function getExtensionId(): string | null {
   if (typeof window === "undefined") return null;
@@ -78,6 +84,12 @@ export async function sendQueueToExtension(
   const init = await sendToExtension({ type: "QUEUE_INIT", batch: lightBatch }, extensionId);
   if (!init.ok) throw new Error(init.error);
 
+  // Remember where each item's artwork lives so the Uploads page can render
+  // thumbnails for the queue it just sent. QUEUE_STATE comes back without
+  // images (they stay in the extension's ImageStore), and this is the only side
+  // that knows the original URL.
+  rememberQueueThumbs(batch);
+
   for (const it of batch.items) {
     if (!it.imageUrl) continue;
     const res = await sendToExtension(
@@ -94,5 +106,61 @@ export async function pingExtension(extensionId?: string): Promise<boolean> {
     return r.ok === true;
   } catch {
     return false;
+  }
+}
+
+/* ── Live queue mirror ──────────────────────────────────────────────────────
+ * The extension owns the queue; the dashboard only reads it and asks for
+ * changes. Every call round-trips to the extension, so what the Uploads page
+ * shows is the extension's real state, never a dashboard-side copy.
+ */
+
+/** Read the extension's current queue (metadata only — no images). */
+export async function fetchQueueState(extensionId?: string): Promise<QueueStateData> {
+  const res = await sendToExtension({ type: "QUEUE_STATE" }, extensionId);
+  if (!res.ok) throw new Error(res.error);
+  return (res.data ?? { batch: null, paused: false, engine: "idle" }) as QueueStateData;
+}
+
+async function control(message: DashboardToExtensionMessage, extensionId?: string): Promise<void> {
+  const res = await sendToExtension(message, extensionId);
+  if (!res.ok) throw new Error(res.error);
+}
+
+export const startQueue     = (id?: string) => control({ type: "QUEUE_START" }, id);
+export const pauseQueue     = (id?: string) => control({ type: "QUEUE_PAUSE" }, id);
+export const clearQueue     = (id?: string) => control({ type: "QUEUE_CLEAR" }, id);
+export const retryQueueItem = (itemId: string, id?: string) => control({ type: "ITEM_RETRY", itemId }, id);
+export const toggleQueueItem = (itemId: string, id?: string) => control({ type: "QUEUE_ITEM_TOGGLE", itemId }, id);
+export const selectAllQueueItems = (value: boolean, id?: string) => control({ type: "QUEUE_SELECT_ALL", value }, id);
+
+/* ── Thumbnail cache ───────────────────────────────────────────────────────
+ * Only http(s) URLs are kept: blob: URLs die with the page that made them and
+ * data: URLs are multi-MB, which would blow localStorage's ~5 MB budget.
+ * Items without a usable URL simply render a placeholder tile.
+ */
+
+type ThumbMap = Record<string, string>;
+
+function rememberQueueThumbs(batch: QueueBatch): void {
+  if (typeof window === "undefined") return;
+  const map: ThumbMap = {};
+  for (const it of batch.items) {
+    if (/^https?:/i.test(it.imageUrl)) map[it.id] = it.imageUrl;
+  }
+  try {
+    window.localStorage.setItem(THUMBS_KEY, JSON.stringify(map));
+  } catch {
+    // Quota or private-mode failure — thumbnails are cosmetic, so ignore.
+  }
+}
+
+export function getQueueThumbs(): ThumbMap {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(THUMBS_KEY);
+    return raw ? (JSON.parse(raw) as ThumbMap) : {};
+  } catch {
+    return {};
   }
 }

@@ -718,6 +718,24 @@ function countBulkTiles(): number {
   return 0;
 }
 
+/** Ask the service worker to confirm access LIVE (Supabase get_my_access) before
+ *  the bulk driver touches the page. Returns false on denial OR on any failure to
+ *  reach/confirm — fail safe. The SW, not this page context, holds the Supabase
+ *  session and does the check (same guardAccess ENGINE_START uses). */
+async function bulkAccessConfirmed(): Promise<boolean> {
+  try {
+    const res = (await chrome.runtime.sendMessage({ type: "ASSERT_ACCESS" })) as
+      | { ok?: boolean; error?: string }
+      | undefined;
+    if (res?.ok === true) return true;
+    log(`bulk[access]: denied — ${res?.error ?? "no response from background"}`);
+    return false;
+  } catch (e) {
+    log(`bulk[access]: could not confirm access — ${(e as Error).message}`);
+    return false;
+  }
+}
+
 /** Resume an active bulk run on whatever page this content script loaded on:
  *   • /designs/bulk_uploader still showing "N of M designs ready for editing…
  *     redirected in a moment" → wait for TeePublic to open the first edit page,
@@ -733,6 +751,19 @@ async function maybeResumeBulk(): Promise<void> {
     }
     return;
   }
+
+  // LIVE access gate. A bulk run self-drives across page loads without going
+  // through the engine loop, so it must confirm access on EVERY page itself —
+  // otherwise it would keep uploading after a sign-out / trial-expiry /
+  // suspension. Ask the service worker (which owns the Supabase check). Fail
+  // SAFE: if access can't be confirmed live, stop the run — a signed-out or
+  // unentitled user must never see the bulk driver publish.
+  if (!(await bulkAccessConfirmed())) {
+    log("bulk[resume]: access NOT confirmed — halting the bulk run (sign in / check your plan)");
+    await BulkStateStore.set(null);
+    return;
+  }
+
   log(`bulk[resume]: active run (index=${state.index}/${state.items.length}, lastId=${state.lastDesignId ?? "-"}) on ${location.pathname}`);
 
   if (/\/designs\/\d+\/edit/.test(location.href)) {

@@ -2,22 +2,85 @@
 //
 // On every matched request we:
 //   1. Refresh the Supabase session and write any rotated auth cookies.
-//   2. Gate access:
-//        - signed out          -> /login (with ?next=)
-//        - signed in, pending  -> /pending  (approved=false)
-//        - signed in, approved -> full app
-//        - /admin/*            -> admins only
+//   2. Resolve access by calling public.get_my_access() LIVE — never a cached
+//      plan/status, never a cookie value. The database is the source of truth.
+//   3. Route by the EFFECTIVE status:
+//        signed out            -> /login (with ?next=)
+//        pending_verification  -> /verify-email
+//        pending_approval      -> /pending
+//        expired | cancelled   -> /trial-expired   (dashboard becomes limited)
+//        suspended             -> /suspended
+//        trialing | active     -> full app
+//        /admin/*              -> admins only
 //
-// IMPORTANT: use supabase.auth.getUser() (not getSession()) in middleware — it
+// IMPORTANT: use supabase.auth.getUser() (not getSession()) here — it
 // revalidates the token with Supabase instead of trusting the cookie.
 
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
+import { getAccess } from "@/lib/access";
+import type { AccessState } from "@teepublic/shared";
 
-const LOGIN_PATH = "/login";
-const PENDING_PATH = "/pending";
+const LOGIN = "/signin";
+const VERIFY = "/verify-email";
+const PENDING = "/pending";
+const EXPIRED = "/trial-expired";
+const SUSPENDED = "/suspended";
 const ADMIN_PREFIX = "/admin";
-const HOME_PATH = "/";
+const HOME = "/dashboard";
+
+// Pages that exist only to explain a blocked state. A user is allowed to see
+// exactly the one that matches their status, and nothing else.
+const STATE_PAGES = [VERIFY, PENDING, EXPIRED, SUSPENDED];
+
+// Routes that must NOT trigger the access RPC (to avoid needless latency):
+// auth callbacks and public/marketing/auth pages. Static assets and /api are
+// already excluded by the matcher in middleware.ts. `/` is the marketing home.
+const PUBLIC_PREFIXES = [
+  "/auth",
+  "/", // marketing home (exact match only)
+  "/how-it-works",
+  "/pricing",
+  "/about",
+  "/faq",
+  "/contact",
+  "/privacy",
+  "/terms",
+  "/download-extension",
+  "/signup",
+  "/forgot-password",
+  "/reset-password",
+  "/login", // legacy — the /login page redirects to /signin
+];
+
+function isPublicPath(pathname: string): boolean {
+  return PUBLIC_PREFIXES.some((p) => pathname === p || pathname.startsWith(`${p}/`));
+}
+
+// Where a given access state is allowed to land. null = full app access.
+// NOTE: this is only ever called for a SIGNED-IN user, so a null access means
+// "no profile row / get_my_access() unavailable" (e.g. migration 0005 not yet
+// applied) — send them to /pending, never /login (that would redirect-loop).
+function gatePathFor(access: AccessState | null): string | null {
+  if (!access) return PENDING;
+  if (access.is_admin) return null; // staff bypass all plan gates
+  switch (access.status) {
+    case "trialing":
+    case "active":
+      return null;
+    case "pending_verification":
+      return VERIFY;
+    case "pending_approval":
+      return PENDING;
+    case "expired":
+    case "cancelled":
+      return EXPIRED;
+    case "suspended":
+      return SUSPENDED;
+    default:
+      return PENDING;
+  }
+}
 
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
@@ -59,56 +122,48 @@ export async function updateSession(request: NextRequest) {
     return res;
   };
 
+  const { pathname } = request.nextUrl;
+
+  // Public / auth-callback routes: refresh the session but DON'T call the access
+  // RPC — these must stay fast and work signed-out.
+  if (isPublicPath(pathname)) return supabaseResponse;
+
   const {
     data: { user },
   } = await supabase.auth.getUser();
 
-  const { pathname } = request.nextUrl;
-  const isLogin = pathname === LOGIN_PATH;
-  const isPending = pathname === PENDING_PATH;
+  const isLogin = pathname === LOGIN;
   const isAdminArea =
     pathname === ADMIN_PREFIX || pathname.startsWith(`${ADMIN_PREFIX}/`);
 
   // --- Signed out -----------------------------------------------------------
   if (!user) {
     if (isLogin) return supabaseResponse;
-    return redirectTo(LOGIN_PATH, true);
+    return redirectTo(LOGIN, true);
   }
 
-  // --- Signed in: load approval + role (RLS allows reading own row) ---------
-  const { data: profile, error } = await supabase
-    .from("profiles")
-    .select("approved, is_admin")
-    .eq("id", user.id)
-    .maybeSingle();
+  // Signed-in users never sit on the login/signup page. Bounce to HOME WITHOUT
+  // an access RPC here — the HOME request resolves access and routes onward.
+  if (isLogin) return redirectTo(HOME);
 
-  console.log("===> USER ID:", user.id);
-  console.log("===> USER EMAIL:", user.email);
-  console.log("===> PROFILE:", profile);
-  console.log("===> ERROR:", error);
+  // --- Signed in: resolve EFFECTIVE access from the DB (single source) -------
+  const access = await getAccess(supabase);
+  const target = gatePathFor(access); // null = allowed into the app
+  const isAdmin = access?.is_admin === true;
 
-  const approved = profile?.approved === true;
-  const isAdmin = profile?.is_admin === true;
-  const allowed = approved || isAdmin; // admins are implicitly allowed
-
-  // Signed-in users never stay on the login page.
-  if (isLogin) {
-    return redirectTo(allowed ? HOME_PATH : PENDING_PATH);
-  }
-
-  // Admin area is admins-only.
+  // Admin area is admins-only, regardless of plan.
   if (isAdminArea) {
     if (isAdmin) return supabaseResponse;
-    return redirectTo(allowed ? HOME_PATH : PENDING_PATH);
+    return redirectTo(target ?? HOME);
   }
 
-  // The pending page is only for users who aren't allowed yet.
-  if (isPending) {
-    return allowed ? redirectTo(HOME_PATH) : supabaseResponse;
+  // Allowed into the app: keep them off the blocked-state pages.
+  if (target === null) {
+    if (STATE_PAGES.includes(pathname)) return redirectTo(HOME);
+    return supabaseResponse;
   }
 
-  // Every other protected route requires approval.
-  if (!allowed) return redirectTo(PENDING_PATH);
-
-  return supabaseResponse;
+  // Blocked: allow ONLY the state page that matches their status.
+  if (pathname === target) return supabaseResponse;
+  return redirectTo(target);
 }

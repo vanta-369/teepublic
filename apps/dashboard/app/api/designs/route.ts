@@ -8,6 +8,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { requireAccess } from "@/lib/access";
 import type { PersistedDesign } from "@/lib/designsStore";
 
 export const runtime = "nodejs";
@@ -30,6 +31,9 @@ function rowToDesign(r: Record<string, unknown>): PersistedDesign {
 }
 
 export async function GET() {
+  // Reads are allowed in "limited" (expired) mode so users keep read-only access
+  // to their own history — RLS already scopes rows to auth.uid(). Only mutating
+  // routes below require active access.
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ ok: false, error: "Not signed in." }, { status: 401 });
@@ -45,8 +49,10 @@ export async function GET() {
 
 export async function POST(req: NextRequest) {
   const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return NextResponse.json({ ok: false, error: "Not signed in." }, { status: 401 });
+  // Writing designs is a paid/trial feature — resolve access LIVE from the DB.
+  const gate = await requireAccess(supabase);
+  if ("response" in gate) return gate.response;
+  const user = { id: gate.access.user_id };
 
   let body: { designs?: unknown };
   try {
@@ -92,8 +98,8 @@ export async function POST(req: NextRequest) {
 
 export async function DELETE(req: NextRequest) {
   const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return NextResponse.json({ ok: false, error: "Not signed in." }, { status: 401 });
+  const gate = await requireAccess(supabase);
+  if ("response" in gate) return gate.response;
 
   const id = req.nextUrl.searchParams.get("id");
   if (!id) return NextResponse.json({ ok: false, error: "Missing id." }, { status: 400 });

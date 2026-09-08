@@ -7,7 +7,7 @@ import type { Config } from "tailwindcss";
 const c = (v: string) => `rgb(var(${v}) / <alpha-value>)`;
 
 const config: Config = {
-  content: ["./app/**/*.{ts,tsx}", "./components/**/*.{ts,tsx}"],
+  content: ["./app/**/*.{ts,tsx}", "./components/**/*.{ts,tsx}", "./lib/**/*.{ts,tsx}"],
   darkMode: "class",
   theme: {
     extend: {

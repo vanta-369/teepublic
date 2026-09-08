@@ -11,24 +11,14 @@
 // max string length (~512 MB → "Invalid string length"). So we export in CHUNKS
 // of 30 designs per file, and import MERGES the chunks back into one queue.
 
-import type { QueueBatch, QueueItem } from "@teepublic/shared";
-import { QueueStore, ImageStore } from "./queueStore";
+// The file format itself lives in @teepublic/shared so the dashboard's Uploads
+// page reads and writes exactly the same files.
+import type { QueueBatch, QueueItem, BatchExportFile } from "@teepublic/shared";
+import { EXPORT_FORMAT, EXPORT_VERSION, CHUNK_SIZE } from "@teepublic/shared";
+import { QueueStore, ImageStore, storeImageWithThumbnail } from "./queueStore";
 
-export const EXPORT_FORMAT = "teepublic-batch-export";
-export const EXPORT_VERSION = 1;
-/** Designs per export file — keeps each JSON well under the ~512 MB string cap. */
-export const CHUNK_SIZE = 30;
-
-export interface BatchExportFile {
-  format: typeof EXPORT_FORMAT;
-  version: number;
-  exportedAt: string;
-  part: number;        // 1-based
-  totalParts: number;
-  batch: QueueBatch;   // this chunk's items only
-  /** itemId → image data URL. One entry per item in this chunk that has an image. */
-  images: Record<string, string>;
-}
+export { EXPORT_FORMAT, EXPORT_VERSION, CHUNK_SIZE };
+export type { BatchExportFile };
 
 /** Gather the current batch into chunk files of CHUNK_SIZE designs each, with
  *  every item's image inlined. Items whose image only exists as a remote URL are
@@ -104,7 +94,9 @@ export async function applyBatchImport(raw: unknown): Promise<{ items: number; i
   let imageCount = 0;
   for (const [itemId, dataUrl] of Object.entries(images)) {
     if (typeof dataUrl === "string" && dataUrl) {
-      await ImageStore.set(itemId, dataUrl);
+      // Stores the original as-is and derives its grid preview, so an imported
+      // batch is as light to browse as one sent from the dashboard.
+      await storeImageWithThumbnail(itemId, dataUrl);
       imageCount++;
     }
   }

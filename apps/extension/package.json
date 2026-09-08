@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.107.0",
     "@teepublic/shared": "*"
   },
   "devDependencies": {

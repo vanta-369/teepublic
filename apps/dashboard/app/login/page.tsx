@@ -1,12 +1,12 @@
-import { Suspense } from "react";
-import { AuthForm } from "@/components/AuthForm";
+import { redirect } from "next/navigation";
 
-export default function LoginPage() {
-  return (
-    <div className="min-h-[60vh] grid place-items-center">
-      <Suspense fallback={null}>
-        <AuthForm />
-      </Suspense>
-    </div>
-  );
+// Legacy route — preserved so old links/bookmarks keep working. Sign-in now
+// lives at /signin; carry any ?next through.
+export default async function LoginRedirect({
+  searchParams,
+}: {
+  searchParams: Promise<{ next?: string }>;
+}) {
+  const { next } = await searchParams;
+  redirect(next ? `/signin?next=${encodeURIComponent(next)}` : "/signin");
 }

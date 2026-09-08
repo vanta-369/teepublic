@@ -12,7 +12,7 @@ export default function AdminPage() {
       <div>
         <h2 className="text-base font-semibold text-accent-400">User administration</h2>
         <p className="text-xs text-zinc-400 mt-1">
-          <span className="text-accent-700">$</span> approve, revoke, or remove accounts
+          <span className="text-accent-700">$</span> approve, trial, grant Pro, suspend/restore, or remove accounts — every action is audited
         </p>
       </div>
       <AdminUsers />

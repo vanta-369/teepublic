@@ -1,5 +1,8 @@
 import type { QueueBatch, QueueItem } from "@teepublic/shared";
-import { QueueStore, SettingsStore, BulkLogStore, ImageStore, type UploadMode } from "../services/queueStore";
+import { QueueStore, SettingsStore, BulkLogStore, getDisplayImages, type UploadMode } from "../services/queueStore";
+import { fetchAccess } from "../lib/access";
+import { signIn, signOut } from "../lib/supabaseClient";
+import { SUPABASE_CONFIGURED } from "../lib/config";
 
 function $(id: string) { return document.getElementById(id) as HTMLElement; }
 
@@ -21,12 +24,24 @@ function tileHtml(item: QueueItem): string {
   `;
 }
 
-/** Fill in tile thumbnails from ImageStore (images aren't kept in the batch). */
+/** Previews already read out of storage. render() rebuilds the grid on EVERY
+ *  queue change, and without this each rebuild re-read and re-decoded every
+ *  visible image — during a run that is once per item status change. */
+const thumbCache = new Map<string, string>();
+
+/** Fill in tile previews (images aren't kept in the batch). One batched storage
+ *  read per page, not one round trip per tile. */
 async function loadThumbnails(grid: HTMLElement): Promise<void> {
-  for (const img of Array.from(grid.querySelectorAll<HTMLImageElement>("img[data-img-id]"))) {
-    const id = img.dataset.imgId;
-    if (!id) continue;
-    const dataUrl = await ImageStore.get(id);
+  const imgs = Array.from(grid.querySelectorAll<HTMLImageElement>("img[data-img-id]"))
+    .filter((img) => !!img.dataset.imgId && !img.getAttribute("src"));
+  if (imgs.length === 0) return;
+
+  const wanted = imgs.map((img) => img.dataset.imgId!).filter((id) => !thumbCache.has(id));
+  if (wanted.length > 0) {
+    for (const [id, dataUrl] of await getDisplayImages(wanted)) thumbCache.set(id, dataUrl);
+  }
+  for (const img of imgs) {
+    const dataUrl = thumbCache.get(img.dataset.imgId!);
     if (dataUrl) img.src = dataUrl;
   }
 }
@@ -118,8 +133,103 @@ function bumpPicked(delta: number): void {
   $("btn-toggle-all").textContent = allSelected ? "Deselect all" : "Select all";
 }
 
+// ── Access gate (popup UI) ───────────────────────────────────────────────────
+// Always resolved LIVE from the database (fetchAccess → get_my_access RPC). The
+// popup never trusts a stored plan/status; it re-queries on open and on any
+// ACCESS_LOCKED broadcast from the background engine.
+function setStartEnabled(enabled: boolean): void {
+  const btn = document.getElementById("btn-start") as HTMLButtonElement | null;
+  if (!btn) return;
+  btn.disabled = !enabled;
+  btn.title = enabled ? "" : "Locked — sign in and make sure your trial or plan is active.";
+}
+
+async function renderAccess(): Promise<void> {
+  const form = $("auth-form");
+  const statusEl = $("auth-status");
+  const note = $("auth-note");
+  const badge = $("auth-badge");
+  const emailLabel = $("auth-email-label");
+  const upgrade = $("auth-upgrade") as HTMLAnchorElement;
+
+  form.hidden = true; statusEl.hidden = true; note.hidden = true;
+
+  if (!SUPABASE_CONFIGURED) {
+    note.hidden = false;
+    note.textContent = "Sign-in unavailable: this build has no Supabase config.";
+    setStartEnabled(false);
+    return;
+  }
+
+  let access;
+  try {
+    access = await fetchAccess();
+  } catch (e) {
+    note.hidden = false;
+    note.textContent = `Access check failed: ${(e as Error).message}`;
+    setStartEnabled(false);
+    return;
+  }
+
+  if (!access) { // signed out
+    form.hidden = false;
+    setStartEnabled(false);
+    return;
+  }
+
+  statusEl.hidden = false;
+  emailLabel.textContent = access.email ?? "";
+  const canRun = access.can_access || access.is_admin;
+  setStartEnabled(canRun);
+
+  badge.className = "badge " + (canRun ? "ok" : access.status === "suspended" ? "err" : "warn");
+  badge.textContent = access.is_admin ? "admin" : access.status;
+
+  if (!canRun && !access.is_admin) {
+    const origin = (await SettingsStore.get()).dashboardOrigin || "https://www.higgstee.com";
+    upgrade.hidden = false;
+    upgrade.href = origin.replace(/\/+$/, "") + "/trial-expired";
+  } else {
+    upgrade.hidden = true;
+  }
+}
+
+function wireAuth(): void {
+  $("auth-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const email = ($("auth-email") as HTMLInputElement).value.trim();
+    const pass = ($("auth-pass") as HTMLInputElement).value;
+    const err = $("auth-error");
+    const btn = $("auth-signin") as HTMLButtonElement;
+    err.textContent = "";
+    btn.disabled = true; btn.textContent = "Signing in…";
+    try {
+      await signIn(email, pass);
+      ($("auth-pass") as HTMLInputElement).value = "";
+      await renderAccess();
+    } catch (e2) {
+      err.textContent = (e2 as Error).message;
+    } finally {
+      btn.disabled = false; btn.textContent = "Sign in";
+    }
+  });
+
+  ($("auth-signout") as HTMLButtonElement).onclick = async () => {
+    await signOut();
+    await renderAccess();
+  };
+
+  // The background engine broadcasts this when a trial expires / account is
+  // suspended mid-run. Re-check live and update the UI.
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg?.type === "ACCESS_LOCKED") void renderAccess();
+  });
+}
+
 async function init() {
   $("ext-id").textContent = `ID: ${chrome.runtime.id}`;
+  wireAuth();
+  void renderAccess();
   render(await QueueStore.get());
   QueueStore.installCrossPageListener(render);
 

@@ -7,6 +7,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { requireAccess } from "@/lib/access";
 import type { SpreadsheetBatch } from "@/lib/spreadsheetStore";
 
 export const runtime = "nodejs";
@@ -30,8 +31,10 @@ export async function GET() {
 
 export async function POST(req: NextRequest) {
   const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return NextResponse.json({ ok: false, error: "Not signed in." }, { status: 401 });
+  // Saving a spreadsheet batch is a paid/trial feature — resolve access live.
+  const gate = await requireAccess(supabase);
+  if ("response" in gate) return gate.response;
+  const user = { id: gate.access.user_id };
 
   let body: { batch?: unknown };
   try {
