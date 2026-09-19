@@ -98,6 +98,7 @@ Edit `apps/extension/src/services/queueStore.ts` to tune.
 ## Notes
 
 - **Selectors**: TeePublic's React app is volatile. All selectors live in
+- Deployment refresh
   `apps/extension/src/lib/selectors.ts` — fix them there only.
 - **First run**: TeePublic must be logged in in the same Chrome profile.
 - **No telemetry**: nothing leaves your machine; the dashboard only runs on
