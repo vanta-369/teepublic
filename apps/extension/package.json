@@ -1,11 +1,12 @@
 {
   "name": "@teepublic/extension",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "node build.mjs --watch",
     "build": "node build.mjs",
+    "release": "node release.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

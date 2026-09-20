@@ -20,3 +20,4 @@ apps/dashboard/.auth
 
 # Test-run artefacts (esbuild bundles produced by tests/run.mjs)
 tests/.build/
+apps/extension/release/

@@ -238,6 +238,8 @@ body[data-view="app"]   #view-app   { display: flex; }
 .divider { height: 1px; background: var(--border); margin: 20px 0 14px; }
 .login-card .btn-secondary { margin-top: 10px; }
 .login-footer { margin: 18px 0 0; font-size: var(--text-xs); color: var(--text-muted); }
+.login-footer a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.login-footer a:hover { color: var(--text); }
 
 /* ── App shell ───────────────────────────────────────────────────────────── */
 .app {
