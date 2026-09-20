@@ -19,7 +19,6 @@ import { loadDesignThumbs, EMPTY_THUMB_INDEX, type DesignThumbIndex } from "@/li
 import {
   clearSalesReport,
   fileToCsvText,
-  isServerStorageMissing,
   loadSalesReport,
   reportToFile,
   saveSalesReport,
@@ -54,29 +53,32 @@ export function Dashboard() {
   // When the saved report was stored, for the "saved" line.
   const [savedAt, setSavedAt] = React.useState<string | null>(null);
   // False when only the browser copy exists (migration 0008 not applied yet).
-  const [syncedToAccount, setSyncedToAccount] = React.useState(true);
   // Distinguishes "still checking for a saved report" from "there isn't one",
   // so the empty state doesn't flash before a restore lands.
   const [isRestoring, setIsRestoring] = React.useState(true);
   const inputRef = React.useRef<HTMLInputElement>(null);
 
-  // Artwork for the design tables, matched from the seller's own library by
-  // TeePublic design id (falling back to title). Loaded once — it's independent
-  // of which file or range is selected.
+  // Artwork for the design tables, matched by title against the seller's own
+  // library IN THIS BROWSER. Loaded once - it is independent of which file or
+  // range is selected. The object URLs it holds are released on unmount.
   React.useEffect(() => {
     let cancelled = false;
+    let loaded: DesignThumbIndex | null = null;
     void loadDesignThumbs().then((map) => {
-      if (!cancelled) setThumbs(map);
+      loaded = map;
+      if (cancelled) { map.revoke(); return; }
+      setThumbs(map);
     });
     return () => {
       cancelled = true;
+      loaded?.revoke();
     };
   }, []);
 
   /**
    * Parse a file and show it.
    *
-   * @param persist Save it to the account as the user's current report. False
+   * @param persist Save it to this device as the user's current report. False
    *   when re-parsing (a column re-map) or when restoring the already-saved
    *   report — neither is a new upload, and re-saving on every re-map would be
    *   a pointless round-trip.
@@ -95,15 +97,15 @@ export function Dashboard() {
 
         if (persist && parsed.rows.length) {
           // Saved as CSV text even for .xlsx, so it re-parses through exactly
-          // the same path on the next visit. This always writes locally first,
-          // so a refresh works even when the account-level table isn't there.
-          const { syncedToAccount } = await saveSalesReport({
+          // the same path on the next visit. It is written to this browser's
+          // IndexedDB: an earnings export is full of design titles and prices,
+          // which is listing content and stays on the device.
+          await saveSalesReport({
             filename: next.name,
             content: await fileToCsvText(next),
             rowCount: parsed.rows.length,
           });
           setSavedAt(new Date().toISOString());
-          setSyncedToAccount(syncedToAccount);
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : "Could not read that file.");
@@ -125,7 +127,6 @@ export function Dashboard() {
         return;
       }
       setSavedAt(report.uploadedAt);
-      setSyncedToAccount(!isServerStorageMissing());
       await ingest(reportToFile(report), undefined, false);
       if (!cancelled) setIsRestoring(false);
     })();
@@ -249,7 +250,7 @@ export function Dashboard() {
               {" · "}
               {rows.length.toLocaleString()} lines
               {savedAt ? ` · saved ${formatDayLong(toDayKey(new Date(savedAt)))}` : ""}
-              {savedAt && (syncedToAccount ? " · on your account" : " · this browser only")}
+              {savedAt ? " · stored on this device only" : ""}
             </span>
           </span>
           <Button variant="ghost" size="sm" onClick={() => inputRef.current?.click()}>

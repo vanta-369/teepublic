@@ -6,7 +6,10 @@ import { stemName } from "./parser";
 export interface MatchedImage {
   stem: string;              // lowercased, extension-stripped key
   originalName: string;      // as the user uploaded it
-  url: string;               // dashboard-served URL
+  /** IndexedDB key of the artwork on THIS device (see lib/spreadsheetStore).
+   *  Deliberately not a URL and never the bytes: the batch record is metadata,
+   *  and the pixels are read only when a preview or an upload needs them. */
+  imageKey: string;
   mime: string;
   size: number;
 }
@@ -24,7 +27,10 @@ export function buildQueue(
       return {
         id: nanoid(10),
         metadata: { ...row.metadata, filename: img.originalName },
-        imageUrl: img.url,
+        // Filled in only at send time, one design at a time, from local
+        // storage - see sendQueueToExtension's resolver. Keeping it empty here
+        // means a 200-design batch never holds 200 images in memory at once.
+        imageUrl: "",
         imageMime: img.mime,
         imageSizeBytes: img.size,
         status: "pending",

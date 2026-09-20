@@ -6,9 +6,17 @@ import type { DesignMetadata, QueueBatch, QueueItem } from "@teepublic/shared";
 import { SLUG_TO_PRODUCT_LABEL } from "@teepublic/shared";
 import { Dropzone } from "./Dropzone";
 import { sendQueueToExtension, getExtensionId } from "@/lib/bridge";
-import { fileToBase64, urlToBase64, generateListing, GEMINI_MODELS, DEFAULT_GEMINI_MODEL, type GeneratedListing } from "@/lib/gemini";
-import { loadDesigns, saveDesigns, type PersistedDesign } from "@/lib/designsStore";
-import { uploadDesignImage } from "@/lib/uploadImage";
+import { fileToBase64, generateListing, GEMINI_MODELS, DEFAULT_GEMINI_MODEL, type GeneratedListing } from "@/lib/gemini";
+import {
+  loadDesigns,
+  saveDesigns,
+  saveDesignImage,
+  getDesignImage,
+  getDesignImageObjectUrl,
+  getDesignImageDataUrl,
+  type PersistedDesign,
+} from "@/lib/designsStore";
+import { blobToBase64 } from "@/lib/localDb";
 import { expandDroppedFiles } from "@/lib/zip";
 import { getGeminiKey, setGeminiKey, getGeminiModel, setGeminiModel, getGeminiPrompt, setGeminiPrompt } from "@/lib/aiSettings";
 import { assertCanGenerate, logGeneration, GenerationBlockedError } from "@/lib/access.client";
@@ -20,9 +28,9 @@ import { DesignPreview, DesignColorSwatches } from "./DesignPreview";
 
 interface StagedImage {
   id: string;
-  // Absent for designs rehydrated from the database (we only kept the URL).
+  /** Present for a file dropped in this session; absent after a reload, when
+   *  the bytes are read back out of IndexedDB by id instead. */
   file?: File;
-  url: string;
   serverFilename: string;
   originalName: string;
   mime: string;
@@ -31,13 +39,21 @@ interface StagedImage {
   base64?: string;
 }
 
-// Get the raw base64 for a design image, whether it came from a fresh upload
-// (has a File) or was rehydrated from the database (only the stored URL).
+/**
+ * The raw base64 for a design image, read from the dropped File or from this
+ * device's IndexedDB. Called ONLY from the two explicit AI actions below,
+ * because this is the data that gets attached to a request to Google.
+ */
 async function ensureBase64(img: StagedImage): Promise<string> {
   if (img.base64) return img.base64;
-  const b64 = img.file ? await fileToBase64(img.file) : await urlToBase64(img.url);
-  img.base64 = b64;
-  return b64;
+  if (img.file) {
+    img.base64 = await fileToBase64(img.file);
+    return img.base64;
+  }
+  const blob = await getDesignImage(img.id);
+  if (!blob) throw new Error("That design's artwork is not on this device any more.");
+  img.base64 = await blobToBase64(blob);
+  return img.base64;
 }
 
 type DesignStatus = "idle" | "generating" | "ready" | "error";
@@ -130,15 +146,19 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
       try {
         const saved = await loadDesigns();
         if (saved.length > 0) {
-          const imgs: StagedImage[] = saved.map((d) => ({
-            id: d.id,
-            url: d.imageUrl,
-            serverFilename: d.serverFilename,
-            originalName: d.originalName,
-            mime: d.mime,
-            size: d.size,
-            previewUrl: d.imageUrl, // no local blob; the stored URL renders fine
-          }));
+          const imgs: StagedImage[] = [];
+          for (const d of saved) {
+            imgs.push({
+              id: d.id,
+              serverFilename: d.serverFilename,
+              originalName: d.originalName,
+              mime: d.mime,
+              size: d.size,
+              // Artwork stays a Blob in IndexedDB; the tile renders from a
+              // short-lived object URL over it.
+              previewUrl: (await getDesignImageObjectUrl(d.id)) ?? "",
+            });
+          }
           const des: GeneratedDesign[] = saved.map((d) => {
             const image = imgs.find((i) => i.id === d.id)!;
             // "generating" is transient — never restore a stuck spinner.
@@ -173,18 +193,19 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
     });
   }, [images]);
 
-  // Save the current batch to the user's account on demand (the Import button),
-  // not automatically. saveDesigns is authoritative: it upserts these designs
-  // and deletes any of the user's designs not in this set.
+  // Save the library to THIS DEVICE on demand (the Save button), not
+  // automatically. saveDesigns is authoritative: what is passed becomes the
+  // whole local library, and artwork for designs that are gone is deleted with
+  // them. Nothing is sent anywhere - see lib/designsStore.ts.
   const [importStage, setImportStage] = useState<"idle" | "saving" | "saved">("idle");
-  async function importToAccount() {
+  async function saveToDevice() {
     setError(null);
     setImportStage("saving");
     try {
-      const payload: PersistedDesign[] = designs.map((d) => ({
+      const now = Date.now();
+      const payload: PersistedDesign[] = designs.map((d, i) => ({
         id: d.image.id,
         sessionId,
-        imageUrl: d.image.url,
         serverFilename: d.image.serverFilename,
         originalName: d.image.originalName,
         mime: d.image.mime,
@@ -192,6 +213,7 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
         listing: d.listing,
         config: d.config,
         status: d.status,
+        updatedAt: now + i,
       }));
       await saveDesigns(payload);
       setImportStage("saved");
@@ -215,19 +237,21 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
     const next: StagedImage[] = [];
     for (const file of files) {
       try {
-        const up = await uploadDesignImage(sessionId, file);
+        const id = nanoid(10);
+        // Store the bytes on this device immediately, so a crash or a closed
+        // tab before the explicit Save cannot lose the artwork.
+        await saveDesignImage(id, file);
         next.push({
-          id: nanoid(10),
+          id,
           file,
-          url: up.url,
-          serverFilename: up.originalName,
-          originalName: up.originalName,
-          mime: up.mime,
-          size: up.size,
+          serverFilename: file.name,
+          originalName: file.name,
+          mime: file.type || "image/png",
+          size: file.size,
           previewUrl: URL.createObjectURL(file),
         });
       } catch (e) {
-        setError(`Upload of ${file.name} failed: ${(e as Error).message}`);
+        setError(`Could not store ${file.name} on this device: ${(e as Error).message}`);
       }
     }
     setImages((prev) => [...prev, ...next]);
@@ -288,7 +312,7 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
           model,
           signal: ac.signal,
         });
-        void logGeneration("success", { model, imageId: img.id });
+        void logGeneration("success", { model });
         setDesigns((prev) => prev.map((d) =>
           d.image.id === img.id ? { ...d, listing, status: "ready" } : d
         ));
@@ -296,14 +320,14 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
         if (ac.signal.aborted) break;
         // Access revoked mid-batch: stop the whole run, don't keep hitting Gemini.
         if (e instanceof GenerationBlockedError) {
-          void logGeneration("denied", { status: e.status, imageId: img.id });
+          void logGeneration("denied", { status: e.status });
           setError((e as Error).message);
           setDesigns((prev) => prev.map((d) =>
             d.status === "generating" ? { ...d, status: "error", error: (e as Error).message } : d
           ));
           break;
         }
-        void logGeneration("failed", { model, imageId: img.id, message: (e as Error).message });
+        void logGeneration("failed", { model });
         setDesigns((prev) => prev.map((d) =>
           d.image.id === img.id ? { ...d, status: "error", error: (e as Error).message } : d
         ));
@@ -372,7 +396,7 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
     try {
       await assertCanGenerate();
     } catch (e) {
-      if (e instanceof GenerationBlockedError) { void logGeneration("denied", { status: e.status, imageId: id }); }
+      if (e instanceof GenerationBlockedError) { void logGeneration("denied", { status: e.status }); }
       setError((e as Error).message);
       setDesigns((prev) => prev.map((d) =>
         d.image.id === id ? { ...d, status: "error", error: (e as Error).message } : d
@@ -391,12 +415,12 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
         imageMime: target.image.mime,
         model,
       });
-      void logGeneration("success", { model, imageId: id });
+      void logGeneration("success", { model });
       setDesigns((prev) => prev.map((d) =>
         d.image.id === id ? { ...d, listing, status: "ready" } : d
       ));
     } catch (e) {
-      void logGeneration("failed", { model, imageId: id, message: (e as Error).message });
+      void logGeneration("failed", { model });
       setDesigns((prev) => prev.map((d) =>
         d.image.id === id ? { ...d, status: "error", error: (e as Error).message } : d
       ));
@@ -438,9 +462,13 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
             enabledProducts: [...d.config.enabledProducts],
           };
           return {
-            id: nanoid(10),
+            // The queue item id IS the local design id, so the extension's
+            // reports and this browser's artwork lookup line up.
+            id: d.image.id,
             metadata: m,
-            imageUrl: d.image.url,
+            // Empty on purpose: artwork is attached one design at a time by
+            // the resolver below, read from this device's IndexedDB.
+            imageUrl: "",
             imageMime: d.image.mime,
             imageSizeBytes: d.image.size,
             status: "pending",
@@ -462,8 +490,11 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
         },
       };
 
-      // Chunked send so large local images don't exceed Chrome's 64 MiB limit.
-      await sendQueueToExtension(batch, extId);
+      // Chunked send so large local images do not exceed Chrome's 64 MiB
+      // limit. Artwork comes from local storage, one design per message, and
+      // goes to the extension on this machine - never through a Higgstee
+      // server. This is the explicit upload action.
+      await sendQueueToExtension(batch, extId, (item) => getDesignImageDataUrl(item.id));
       setStage("sent");
     } catch (e) {
       setError((e as Error).message);
@@ -482,7 +513,16 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
               Get a free key at{" "}
               <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" className="underline">
                 aistudio.google.com/apikey
-              </a>. Stored only in this browser&apos;s localStorage.
+              </a>. Stored only in this browser, never sent to Higgstee.
+            </p>
+            {/* The transfer disclosure the Privacy Policy promises, shown at
+                the point where the user turns the feature on. */}
+            <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+              When you press Generate, this page sends the design image and your prompt
+              <strong className="font-semibold"> directly from your browser to Google Gemini</strong>,
+              using the key above. Higgstee does not see the image, the prompt, the
+              generated listing or the key, and nothing is sent until you press Generate.{" "}
+              <a href="/privacy" className="underline">How your data is handled</a>
             </p>
           </div>
           {apiKey ? <span className="chip-ok">Saved</span> : <span className="chip-warn">Not set</span>}
@@ -644,9 +684,9 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
             type="button"
             className="btn-ghost text-base px-6 py-3"
             disabled={designs.length === 0 || importStage === "saving"}
-            onClick={importToAccount}
+            onClick={saveToDevice}
           >
-            {importStage === "saving" ? "Importing…" : importStage === "saved" ? "Imported ✓" : `Import (${designs.length})`}
+            {importStage === "saving" ? "Saving…" : importStage === "saved" ? "Saved on this device ✓" : `Save on this device (${designs.length})`}
           </button>
           <button
             type="button"

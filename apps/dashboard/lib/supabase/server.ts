@@ -4,6 +4,7 @@
 
 import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
+import { guardedFetch } from "./guardedFetch";
 
 export async function createClient() {
   const cookieStore = await cookies();
@@ -12,6 +13,9 @@ export async function createClient() {
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
+      // See lib/supabase/guardedFetch.ts - artwork and listing content can
+      // never leave through this client.
+      global: { fetch: guardedFetch },
       cookies: {
         getAll() {
           return cookieStore.getAll();

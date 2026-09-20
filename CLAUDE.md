@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Local-first batch upload manager for [TeePublic](https://www.teepublic.com), now with a Supabase-backed SaaS access layer. Two products in one npm-workspace monorepo talk over Chrome's messaging bridge:
 
-- **Dashboard** (`apps/dashboard`) — Next.js 15 / React 19 / Tailwind, runs on `localhost:3030`. Parses spreadsheets **or** generates listings with Gemini, validates, previews, and pushes a queue to the extension. Also hosts auth, the account/access gates, and the admin panel.
+- **Dashboard** (`apps/dashboard`) — Next.js 15 / React 19 / Tailwind, runs on `localhost:3030`. Parses spreadsheets **or** generates listings with Gemini, validates, previews, and pushes a queue to the extension. Also hosts auth, the account/access gates, and the admin panel. Designs, listings and artwork live in the browser's IndexedDB — see **Local-first data** below, which is the single most important constraint in this repo.
 - **Extension** (`apps/extension`) — MV3 Chrome extension, esbuild-bundled. Receives the queue, persists it in `chrome.storage.local`, and drives the TeePublic upload pages through a content script.
 - **Shared** (`packages/shared`) — pure TypeScript types + the wire protocol + the `AccessState` contract, consumed by both.
 
@@ -36,7 +36,24 @@ makes the next visit to every route recompile from scratch (a first visit costs
 1–6s in dev; ~20s for `/dashboard/analytics`, the recharts route). Warm
 navigation is ~0.2–0.7s.
 
-There is **no automated test suite** and no test runner configured. The verification loop is: extension `typecheck`, dashboard `lint`, and the two `build` scripts. Don't invent `npm test`.
+```bash
+npm test                    # node tests/run.mjs - esbuild-bundles tests/*.test.ts
+                            # and runs them under node --test
+npm test upload             # only test files whose name contains "upload"
+npm run typecheck           # tsc --noEmit for BOTH workspaces
+npm run verify              # typecheck + test + both builds, in order
+```
+
+`next lint` in `apps/dashboard` is **not configured** — there is no ESLint config in
+the repo, so the script drops into Next's interactive setup prompt and fails in a
+non-interactive shell. Use `npm run typecheck` instead; fixing or removing the
+`lint` script is outstanding.
+
+The test suite (`tests/`) is mostly about the privacy invariants below: what may
+go on the wire, what must stay local, and what the migrations declare. It bundles
+each test with esbuild before running so the tests import the REAL application
+modules — path aliases, the `@teepublic/shared` TS package and the extension's
+build-time `define`s all resolve exactly as they do in a build.
 
 ### Loading / rebuilding the extension
 
@@ -50,7 +67,9 @@ Copy `apps/dashboard/.env.example` → `.env.local`: `NEXT_PUBLIC_SUPABASE_URL`,
 
 ### The dashboard ↔ extension wire protocol (`packages/shared/src/protocol.ts`)
 
-The dashboard sends `chrome.runtime.sendMessage(extensionId, …)`; the extension's `onMessageExternal` listener receives it. **Images are transported separately from metadata on purpose:** `QUEUE_INIT` carries the batch with every `imageUrl` blanked to `""`, then each design's (multi-MB base64) image follows in its own `QUEUE_IMAGE` message. This keeps any single message under Chrome's 64 MiB runtime-message cap. In the extension, each image is stored under its **own** `ImageStore` key — *not* inside the batch object — because rewriting the whole batch on every image arrival was O(N²) and filled storage (`FILE_ERROR_NO_SPACE`). `apps/dashboard/lib/bridge.ts` (`sendQueueToExtension`) is the sender; `apps/extension/src/background/index.ts` is the receiver.
+The dashboard sends `chrome.runtime.sendMessage(extensionId, …)`; the extension's `onMessageExternal` listener receives it. **Images are transported separately from metadata on purpose:** `QUEUE_INIT` carries the batch with every `imageUrl` blanked to `""`, then each design's (multi-MB base64) image follows in its own `QUEUE_IMAGE` message. This keeps any single message under Chrome's 64 MiB runtime-message cap. In the extension, each image is stored under its **own** key in the `ImageStore` — *not* inside the batch object — because rewriting the whole batch on every image arrival was O(N²) and filled storage (`FILE_ERROR_NO_SPACE`). That store is now backed by **IndexedDB** (`src/lib/imageDb.ts`), not `chrome.storage.local`. `apps/dashboard/lib/bridge.ts` (`sendQueueToExtension`) is the sender; `apps/extension/src/background/index.ts` is the receiver.
+
+The sender also takes a `resolveImage` callback. Artwork is NOT carried on the queue item: `sendQueueToExtension` reads one design at a time out of the dashboard's local IndexedDB, so a 200-design batch never holds 200 images in memory, and the batch that gets stored anywhere is metadata-only.
 
 ### Extension automation (the hard part)
 
@@ -82,7 +101,51 @@ Sensitive `profiles` columns (`plan`, `trial_*`, `account_status`, `approved`) h
 - **spreadsheet** — `lib/parser.ts` reads `.xlsx`/`.csv`, images are matched to rows by filename **stem** (lowercased, extension-stripped, so `1` matches `1.png`), `lib/validator.ts` validates, `lib/queue.ts` (`buildQueue`) assembles the `QueueBatch`.
 - **generate** — `components/GenerationApp.tsx` + `lib/gemini.ts` call Gemini directly from the browser with the user's own API key (never proxied server-side) and a `responseSchema` that maps to `DesignMetadata`.
 
-Designs and spreadsheet batches persist **per-user in Supabase** (RLS-scoped to `auth.uid()`), so work follows the account across browsers — see `lib/designsStore.ts` + `app/api/designs/route.ts` and migrations `0002`/`0003`. Design images live in a Supabase Storage `designs` bucket (public URLs, so the extension fetches them directly).
+Designs and spreadsheet batches persist **locally, in the browser's IndexedDB** — `lib/localDb.ts` is the store, `lib/designsStore.ts` and `lib/spreadsheetStore.ts` are the two façades over it. There are no `/api/designs` or `/api/spreadsheet` routes any more, and nothing follows the account across browsers. Moving work between machines is the export/import batch file on the Uploads page.
+
+### Local-first data — the rule that outranks convenience
+
+**Designs, listing copy and artwork never reach Higgstee's servers.** This is a
+product promise, published at `/privacy`, and it is enforced in three places so
+that breaking it is loud rather than silent:
+
+1. **Storage.** `apps/dashboard/lib/localDb.ts` — IndexedDB, three object
+   stores: `designs` (metadata + listing + config, never bytes), `images` (one
+   Blob per design), `docs` (the spreadsheet batch, the earnings export). The
+   extension mirrors this in `apps/extension/src/lib/imageDb.ts`; artwork is
+   **not** in `chrome.storage.local` any more (that area ran out of space, and
+   its change events pushed every image into every open page).
+2. **The wire.** Both Supabase clients — dashboard (`lib/supabase/client.ts`,
+   `server.ts`, `middleware.ts`) and extension (`src/lib/supabaseClient.ts`) —
+   are constructed with a `fetch` that throws on image bytes or listing content.
+   The predicates live in `packages/shared/src/privacy.ts`. If you add a Supabase
+   call that carries a title or a data URL, it fails in development.
+3. **The database.** Migration `0010` makes the retired tables and the `designs`
+   Storage bucket read-only; migration `0009` reduces upload stats to
+   `upload_stats (user_id, total_upload_count, updated_at)`.
+
+What Supabase may hold, and nothing more: user id, email, approval/trial/plan/
+subscription/account status, admin flag, and that one upload count.
+
+**When an upload succeeds**, the extension calls the no-argument RPC
+`increment_upload_count()`; the server resolves the account from `auth.uid()`.
+Double counting is prevented **locally**, by item id, in
+`src/lib/uploadCounter.ts` — deliberately, because the old dedupe key was the
+published listing URL, and using it meant storing it.
+
+**Before changing anything here**, read `tests/no-server-storage.test.ts`: it
+pins the removed routes, the permitted `localStorage` writers, the manifest
+permissions and the guarded clients, and it reads the real source tree.
+
+### Migrations 0009–0011 and the pending cleanup
+
+`0009` (new counter + backfill) and `0010` (lock legacy writes) are safe and
+should be applied. `supabase/INSPECT_LEGACY_DATA.sql` is read-only and reports
+what artwork and listing content a project still holds. **`0011_cleanup_legacy_data.sql`
+is inert** — every destructive statement is commented out and must stay that way
+until the owner has reviewed the inspection output and approved the deletion.
+Flipping the public `designs` bucket private is documented in `0010` step 6 and
+is likewise not executed.
 
 ### Shared package has no build step
 

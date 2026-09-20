@@ -56,6 +56,8 @@ export interface ValidationIssue {
 }
 
 export interface DashboardOrigin {
-  /** e.g. http://localhost:3000 — the extension fetches images from this origin */
+  /** e.g. http://localhost:3030 — the dashboard origin the extension opens tabs
+   *  at (sign in, upgrade) and validates messages against. Never an image or
+   *  listing source: the extension reads artwork from its own IndexedDB only. */
   origin: string;
 }

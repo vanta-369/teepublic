@@ -234,7 +234,9 @@ function statusBadge(status: string): string {
 
 function cardHtml(item: QueueItem): string {
   const selected = item.selected !== false;
-  const src = item.imageUrl ? `src="${esc(item.imageUrl)}"` : `data-img-id="${esc(item.id)}"`;
+  // Thumbnails come from this device's ImageStore only (loadThumbnails fills
+  // them in) — never from a URL the browser would have to fetch.
+  const src = `data-img-id="${esc(item.id)}"`;
   return `
     <div class="card ${selected ? "selected" : ""}" data-id="${esc(item.id)}" data-status="${esc(item.status)}" title="${esc(item.metadata?.title ?? "")}">
       <img class="thumb" ${src} alt="" onerror="this.style.opacity=0.25" />

@@ -1,23 +1,22 @@
-// Persistence for the user's earnings export.
+// The user's TeePublic earnings export.
 //
-// TWO LAYERS, on purpose:
+// THIS IS LOCAL-ONLY. It used to be stored twice: raw CSV text in a Supabase
+// `sales_reports` row (so it followed the account across devices) and a capped
+// copy in localStorage. The export is listing content — every row carries a
+// design title, a product type and a price — so the server copy is gone and the
+// localStorage copy with it. The file now lives in IndexedDB, which has no
+// 5 MB ceiling, so the size cap that used to silently skip large exports is
+// gone too.
 //
-//   1. Supabase (`sales_reports`) — follows the account across browsers and
-//      devices. Requires migration 0008 to have been applied.
-//   2. localStorage — always written, works with zero setup, survives a
-//      refresh on this browser.
-//
-// Reads prefer the server and fall back to local. That means the page keeps
-// working before the migration is applied (the common case right after
-// pulling these changes), and transparently upgrades to cross-device once it
-// is. A server write failing is never fatal: the local copy already succeeded,
-// so the user still gets their file back on refresh.
+// What that costs: an export uploaded on one machine is not visible on another.
+// Re-drop the file there; parsing is instant and the file is the user's own.
 //
 // The stored form is always CSV TEXT. An .xlsx dropped on the page is converted
 // to CSV before saving, so what comes back is re-parseable by the same
-// `parseSalesFile` path as a fresh upload — one parser, one source of truth.
+// `parseSalesFile` path as a fresh upload - one parser, one source of truth.
 
 import * as XLSX from "xlsx";
+import { DOC_SALES_REPORT, deleteDoc, getDoc, putDoc } from "@/lib/localDb";
 
 export interface StoredReport {
   filename: string;
@@ -26,85 +25,50 @@ export interface StoredReport {
   uploadedAt: string;
 }
 
-const LOCAL_KEY = "teepublic.salesreport";
+/** Legacy key: the pre-IndexedDB browser copy, migrated on first read. */
+const LEGACY_LOCAL_KEY = "teepublic.salesreport";
 
 /**
- * localStorage is ~5 MB per origin and stores UTF-16, so a big CSV can blow the
- * quota and take unrelated keys down with it. Refuse early rather than throw
- * mid-write; the server copy (when configured) has no such limit.
+ * The report is only ever on this device now, so there is no "synced to
+ * account" state to report. Kept as an explicit export because the Sales page
+ * shows the user where their file lives.
  */
-const LOCAL_MAX_CHARS = 2_000_000;
-
-/** Whether the server-side table is reachable. `null` until first checked. */
-let serverAvailable: boolean | null = null;
-
-/** True when the server rejected us because migration 0008 isn't applied. */
 export function isServerStorageMissing(): boolean {
-  return serverAvailable === false;
+  return true;
 }
 
-// ── local layer ────────────────────────────────────────────────────────────
-
-function readLocal(): StoredReport | null {
+function takeLegacyLocalCopy(): StoredReport | null {
   if (typeof window === "undefined") return null;
   try {
-    const raw = window.localStorage.getItem(LOCAL_KEY);
+    const raw = window.localStorage.getItem(LEGACY_LOCAL_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as StoredReport;
+    // Move it, don't copy it: leaving listing content in localStorage after
+    // this migration would defeat the point of the migration.
+    window.localStorage.removeItem(LEGACY_LOCAL_KEY);
     return parsed?.content ? parsed : null;
   } catch {
     return null;
   }
 }
 
-function writeLocal(report: StoredReport): void {
-  if (typeof window === "undefined") return;
-  try {
-    if (report.content.length > LOCAL_MAX_CHARS) return;
-    window.localStorage.setItem(LOCAL_KEY, JSON.stringify(report));
-  } catch {
-    // Quota exceeded or storage disabled (private mode). Not fatal.
-  }
-}
-
-function clearLocal(): void {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.removeItem(LOCAL_KEY);
-  } catch {
-    /* ignore */
-  }
-}
-
-// ── public API ─────────────────────────────────────────────────────────────
-
-/** The saved report from the server, falling back to this browser's copy. */
+/** The saved report from this device, or null. */
 export async function loadSalesReport(): Promise<StoredReport | null> {
-  try {
-    const res = await fetch("/api/sales-report", { cache: "no-store" });
-    if (res.ok) {
-      const json = (await res.json()) as { ok?: boolean; report?: StoredReport | null };
-      if (json.ok) {
-        serverAvailable = true;
-        // A server copy wins, but an empty server with a local copy still
-        // shows the local one — that's the pre-migration case.
-        if (json.report) return json.report;
-      }
-    } else if (res.status !== 401) {
-      // 401 just means signed out; anything else (404/500 from a missing
-      // table) means server storage isn't usable.
-      serverAvailable = false;
-    }
-  } catch {
-    serverAvailable = false;
+  const stored = await getDoc<StoredReport>(DOC_SALES_REPORT).catch(() => null);
+  if (stored?.content) return stored;
+
+  const legacy = takeLegacyLocalCopy();
+  if (legacy) {
+    await putDoc(DOC_SALES_REPORT, legacy).catch(() => {});
+    return legacy;
   }
-  return readLocal();
+  return null;
 }
 
 /**
- * Save the report. Writes locally first so a refresh always works, then tries
- * the server. Returns a note when the server copy didn't happen, so the UI can
- * say "this browser only" rather than claiming a cross-device save.
+ * Save the report to this device. The return shape is kept so callers can keep
+ * telling the user plainly that the file stays here; `syncedToAccount` is
+ * always false because there is no account copy by design.
  */
 export async function saveSalesReport(input: {
   filename: string;
@@ -112,41 +76,34 @@ export async function saveSalesReport(input: {
   rowCount: number;
 }): Promise<{ syncedToAccount: boolean; error: string | null }> {
   const report: StoredReport = { ...input, uploadedAt: new Date().toISOString() };
-  writeLocal(report);
-
   try {
-    const res = await fetch("/api/sales-report", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(input),
-    });
-    const json = await res.json().catch(() => ({ ok: false, error: null }));
-    if (json.ok) {
-      serverAvailable = true;
-      return { syncedToAccount: true, error: null };
-    }
-    serverAvailable = false;
-    return { syncedToAccount: false, error: json.error ?? `HTTP ${res.status}` };
+    await putDoc(DOC_SALES_REPORT, report);
+    return { syncedToAccount: false, error: null };
   } catch (err) {
-    serverAvailable = false;
     return {
       syncedToAccount: false,
-      error: err instanceof Error ? err.message : "network error",
+      error: err instanceof Error ? err.message : "could not save to this device",
     };
   }
 }
 
 export async function clearSalesReport(): Promise<void> {
-  clearLocal();
-  await fetch("/api/sales-report", { method: "DELETE" }).catch(() => {});
+  await deleteDoc(DOC_SALES_REPORT).catch(() => {});
+  if (typeof window !== "undefined") {
+    try {
+      window.localStorage.removeItem(LEGACY_LOCAL_KEY);
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 /**
  * Read a dropped file as the CSV text we persist.
  *
  * `.xlsx`/`.xls` are converted via SheetJS rather than stored as base64: the
- * text round-trips through the same parser as a real CSV, stays human-readable
- * in the database, and avoids inflating a binary by a third just to store it.
+ * text round-trips through the same parser as a real CSV and avoids inflating
+ * a binary by a third just to store it.
  */
 export async function fileToCsvText(file: File): Promise<string> {
   if (!/\.(xlsx|xlsm|xlsb|xls)$/i.test(file.name)) return file.text();
@@ -155,7 +112,7 @@ export async function fileToCsvText(file: File): Promise<string> {
   const sheet = wb.Sheets[wb.SheetNames[0]];
   if (!sheet) return "";
   // `sheet_to_csv` preserves the leading preamble rows TeePublic puts above the
-  // real header — the parser needs them present so it can skip them itself.
+  // real header - the parser needs them present so it can skip them itself.
   return XLSX.utils.sheet_to_csv(sheet);
 }
 

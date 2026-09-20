@@ -93,8 +93,9 @@ function renderPager(total: number, pageCount: number, start: number, shown: num
 
 function cardHtml(item: QueueItem): string {
   const selected = item.selected !== false;
-  const cached = thumbCache.get(item.id);
-  const src = item.imageUrl || cached;
+  // The cached local preview, or nothing until loadThumbnails reads it out of
+  // ImageStore. item.imageUrl is not a fallback: artwork is never fetched.
+  const src = thumbCache.get(item.id);
   return `
     <div class="card ${selected ? "" : "deselected"}" data-toggle-id="${item.id}">
       <div class="thumb">

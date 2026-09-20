@@ -15,6 +15,9 @@ type Tab = "info" | "colors" | "products";
 interface Props {
   row: ParsedRow;
   image: MatchedImage | undefined;
+  /** Object URL over the artwork held in this device's IndexedDB. The image
+   *  record itself carries no URL and no bytes - see lib/spreadsheetStore.ts. */
+  previewSrc?: string;
   onChange: (rowNumber: number, next: DesignMetadata) => void;
   onRemove?: () => void;
   customBasicColors?: CustomBasicColor[];
@@ -38,7 +41,7 @@ const ALL_PRODUCTS = [
 ];
 
 export function DesignCard({
-  row, image, onChange, onRemove,
+  row, image, previewSrc, onChange, onRemove,
   customBasicColors, onAddCustomBasicColor, onRemoveCustomBasicColor,
   totalDesigns, onApplyColorsToAll, onApplyProductsToAll,
 }: Props) {
@@ -72,7 +75,7 @@ export function DesignCard({
           mirrors the "Generate with AI" Design Configuration layout. */}
       <div className="grid grid-cols-1 lg:grid-cols-[260px_1fr] gap-6">
         <div className="relative">
-          <DesignPreview src={image?.url} alt={m.title} productColors={m.productColors ?? {}} />
+          <DesignPreview src={previewSrc} alt={m.title} productColors={m.productColors ?? {}} />
           <div className="mt-2 truncate text-xs text-zinc-500 dark:text-zinc-400" title={row.metadata.filename}>
             {row.metadata.filename}
           </div>

@@ -6,6 +6,7 @@ import type {
   DashboardToExtensionMessage,
   ExtensionToDashboardResponse,
   QueueBatch,
+  QueueItem,
   QueueStateData,
 } from "@teepublic/shared";
 
@@ -27,7 +28,6 @@ function chromeRuntime(): ChromeRuntime | undefined {
 }
 
 const STORAGE_KEY = "teepublic.extensionId";
-const THUMBS_KEY = "teepublic.queueThumbs";
 
 export function getExtensionId(): string | null {
   if (typeof window === "undefined") return null;
@@ -70,12 +70,23 @@ export function sendToExtension(
 }
 
 /** Send a queue to the extension WITHOUT exceeding Chrome's 64 MiB per-message
- *  limit. Local designs carry their image as a multi-MB base64 data URL, so a
- *  whole batch in one QUEUE_INIT can blow the cap. Instead: send QUEUE_INIT with
- *  images stripped (metadata only), then each image in its own QUEUE_IMAGE. */
+ *  limit, and without ever holding the whole batch's artwork in memory.
+ *
+ *  QUEUE_INIT carries metadata only; each design's image follows in its own
+ *  QUEUE_IMAGE message. The bytes come from `resolveImage`, which reads ONE
+ *  design at a time out of this device's IndexedDB (lib/localDb.ts) — they are
+ *  never part of the stored batch, and they never touch a Higgstee server.
+ *
+ *  This is the explicit-upload boundary described in the Privacy Policy: it
+ *  runs only from a user pressing Send, and it hands the design to the local
+ *  extension, which submits it to the marketplace the user chose.
+ */
+export type QueueImageResolver = (item: QueueItem) => Promise<string | null>;
+
 export async function sendQueueToExtension(
   batch: QueueBatch,
   extensionId?: string,
+  resolveImage?: QueueImageResolver,
 ): Promise<void> {
   const lightBatch: QueueBatch = {
     ...batch,
@@ -84,16 +95,13 @@ export async function sendQueueToExtension(
   const init = await sendToExtension({ type: "QUEUE_INIT", batch: lightBatch }, extensionId);
   if (!init.ok) throw new Error(init.error);
 
-  // Remember where each item's artwork lives so the Uploads page can render
-  // thumbnails for the queue it just sent. QUEUE_STATE comes back without
-  // images (they stay in the extension's ImageStore), and this is the only side
-  // that knows the original URL.
-  rememberQueueThumbs(batch);
-
   for (const it of batch.items) {
-    if (!it.imageUrl) continue;
+    // Fall back to an inline URL for callers that already have one (the batch
+    // import path), otherwise read the artwork from local storage on demand.
+    const imageUrl = (await resolveImage?.(it)) ?? it.imageUrl;
+    if (!imageUrl) continue;
     const res = await sendToExtension(
-      { type: "QUEUE_IMAGE", itemId: it.id, imageUrl: it.imageUrl },
+      { type: "QUEUE_IMAGE", itemId: it.id, imageUrl },
       extensionId,
     );
     if (!res.ok) throw new Error(`image for ${it.metadata.filename || it.id}: ${res.error}`);
@@ -134,33 +142,9 @@ export const retryQueueItem = (itemId: string, id?: string) => control({ type: "
 export const toggleQueueItem = (itemId: string, id?: string) => control({ type: "QUEUE_ITEM_TOGGLE", itemId }, id);
 export const selectAllQueueItems = (value: boolean, id?: string) => control({ type: "QUEUE_SELECT_ALL", value }, id);
 
-/* ── Thumbnail cache ───────────────────────────────────────────────────────
- * Only http(s) URLs are kept: blob: URLs die with the page that made them and
- * data: URLs are multi-MB, which would blow localStorage's ~5 MB budget.
- * Items without a usable URL simply render a placeholder tile.
+/* Queue thumbnails used to be mirrored into localStorage here so the Uploads
+ * page could paint tiles for a batch it had just sent. They are gone: the
+ * extension derives its own small previews from the artwork it was handed, and
+ * the dashboard reads previews straight out of this device's IndexedDB. Nothing
+ * about a listing needs a second copy in a 5 MB, origin-wide, string-only store.
  */
-
-type ThumbMap = Record<string, string>;
-
-function rememberQueueThumbs(batch: QueueBatch): void {
-  if (typeof window === "undefined") return;
-  const map: ThumbMap = {};
-  for (const it of batch.items) {
-    if (/^https?:/i.test(it.imageUrl)) map[it.id] = it.imageUrl;
-  }
-  try {
-    window.localStorage.setItem(THUMBS_KEY, JSON.stringify(map));
-  } catch {
-    // Quota or private-mode failure — thumbnails are cosmetic, so ignore.
-  }
-}
-
-export function getQueueThumbs(): ThumbMap {
-  if (typeof window === "undefined") return {};
-  try {
-    const raw = window.localStorage.getItem(THUMBS_KEY);
-    return raw ? (JSON.parse(raw) as ThumbMap) : {};
-  } catch {
-    return {};
-  }
-}

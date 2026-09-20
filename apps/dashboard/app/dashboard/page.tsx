@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { createClient } from "@/lib/supabase/server";
 import { DashHeader } from "@/components/dashboard/DashBits";
 import { UploadStats } from "@/components/dashboard/UploadStats";
 import { PLATFORMS } from "@/lib/platforms";
@@ -18,12 +17,7 @@ const ICONS: Record<string, React.ReactNode> = {
   chart: (<svg {...svg}><path d="M4 20V4" /><path d="M4 20h16" /><rect x="8" y="12" width="3" height="5" /><rect x="14" y="8" width="3" height="9" /></svg>),
 };
 
-export default async function DashboardHome() {
-  const supabase = await createClient();
-  const { count } = await supabase
-    .from("designs")
-    .select("id", { count: "exact", head: true });
-  const productCount = count ?? 0;
+export default function DashboardHome() {
   const livePlatforms = PLATFORMS.filter((p) => p.status === "live").length;
 
   // Every card links to a route that's still in the sidebar. Products,
@@ -31,7 +25,9 @@ export default async function DashboardHome() {
   // from the home page would send people into pages the nav no longer offers a
   // way back from.
   const stats = [
-    { label: "Products", value: String(productCount), sub: "in your library", href: "/dashboard/create", icon: "grid", grad: "su-grad-primary" },
+    // Product count moved into <UploadStats />, which reads it from this
+    // browser's IndexedDB. The library is local now, so the server rendering
+    // this page genuinely does not know how many designs the user has.
     { label: "Live platforms", value: `${livePlatforms}/${PLATFORMS.length}`, sub: "TeePublic ready", href: "/dashboard/uploads", icon: "link", grad: "su-grad-success" },
     { label: "Extension", value: "Setup", sub: "Connect Chrome", href: "/dashboard/extension", icon: "puzzle", grad: "su-grad-info" },
     { label: "Sales & earnings", value: "Report", sub: "Upload your export", href: "/dashboard/analytics", icon: "chart", grad: "su-grad-warn" },
@@ -49,9 +45,9 @@ export default async function DashboardHome() {
         <Link href="/dashboard/create" className="btn-primary">Create Product</Link>
       </DashHeader>
 
-      {/* Upload volume — today / yesterday / 7d / 30d, from the get_upload_stats
-          RPC. Client component: the buckets are resolved in the user's own
-          timezone, which only the browser knows. */}
+      {/* Upload activity. Client component: one figure comes from the account's
+          aggregate counter in Supabase, the other from the design library in
+          this browser's IndexedDB - and only the browser can read that. */}
       <UploadStats />
 
       {/* Stat cards */}

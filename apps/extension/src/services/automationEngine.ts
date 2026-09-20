@@ -123,17 +123,38 @@ class AutomationEngine {
       await QueueStore.setItemStatus(it.id, "running", { attempts: it.attempts + 1, lastError: undefined });
     }
     try {
+      // Resolve every image from local storage FIRST. One design whose artwork
+      // is missing must not sink the run: it fails on its own with the
+      // instruction, and the rest of the batch is dispatched.
+      const ready: QueueItem[] = [];
+      const imageDataUrls: string[] = [];
+      for (const it of items) {
+        try {
+          imageDataUrls.push(await imageDataUrlFor(it));
+          ready.push(it);
+        } catch (err) {
+          if (!(err instanceof MissingImageError)) throw err;
+          await QueueStore.setItemStatus(it.id, "failed", {
+            lastError: err.message,
+            attempts: it.attempts + 1,
+          });
+          BulkLogStore.append(`${it.metadata.filename}: ${err.message}`);
+        }
+      }
+      if (ready.length === 0) {
+        await this.reconcileBulk(items);
+        return;
+      }
+
       const tabId = await this.ensureBulkTab();
       this.currentTabId = tabId;
-      const imageDataUrls: string[] = [];
-      for (const it of items) imageDataUrls.push(await imageDataUrlFor(it));
       await ensureContentScriptReady(tabId);
 
       // 1. Dispatch all files. The content script waits for processing to finish,
       //    persists the run (items + index), and clicks GET STARTED. From here on
       //    the content script self-resumes on every /edit page it lands on.
       const disp = await sendToTab<{ ok: boolean; validIds?: string[]; error?: string }>(
-        tabId, { type: "AUTOMATION_BULK_DISPATCH", items, imageDataUrls });
+        tabId, { type: "AUTOMATION_BULK_DISPATCH", items: ready, imageDataUrls });
       const validIds = disp?.validIds ?? [];
       if (validIds.length === 0) {
         // Every design was too small / rejected / upload failed — statuses fired.
@@ -144,7 +165,7 @@ class AutomationEngine {
 
       // 2. Monitor: wait until every dispatched design is resolved (succeeded or
       //    failed via ITEM_STATUS) or the run goes idle. ~2 min budget/design.
-      const dispatched = validIds.map((id) => items.find((i) => i.id === id)!).filter(Boolean);
+      const dispatched = validIds.map((id) => ready.find((i) => i.id === id)!).filter(Boolean);
       await this.waitForBulkComplete(dispatched, validIds.length * 120_000 + 60_000);
 
       await BulkStateStore.set(null); // clear run state
@@ -262,6 +283,17 @@ class AutomationEngine {
       await ImageStore.remove(item.id); // free its (large) stored image
       console.info(`[teepublic-cs] item ${item.id} succeeded: ${result.publishedUrl} — moving on`);
     } catch (err) {
+      // No artwork on this device: nothing was uploaded and nothing remote will
+      // be fetched to fix it. Fail the item with the instruction, keep it in the
+      // queue (Retry works once the batch is re-imported) and do not count it.
+      if (err instanceof MissingImageError) {
+        await QueueStore.setItemStatus(item.id, "failed", {
+          lastError: err.message,
+          attempts: item.attempts + 1,
+        });
+        console.warn(`[teepublic] item ${item.id} has no local artwork — ${err.message}`);
+        return;
+      }
       // The content script's ITEM_STATUS / PUBLISHED_URL_DETECTED may already
       // have marked this item succeeded, OR may still be on its way (sendToTab
       // can reject the instant the publish navigation closes the message port,
@@ -467,25 +499,28 @@ async function waitForSucceededSignal(itemId: string, tabId: number | null, time
   return false;
 }
 
-// Get a design's image as a data URL: prefer the locally-stored copy (kept in
-// its own ImageStore key, out of the batch), else fetch the http(s) URL.
+/** Shown on the item when its artwork is not on this device. It names the two
+ *  ways to get it back, both local: re-import the batch export file, or pick the
+ *  file again on the dashboard. */
+export const MISSING_IMAGE_MESSAGE = "Image missing — import the batch again or select the image";
+
+export class MissingImageError extends Error {
+  constructor() {
+    super(MISSING_IMAGE_MESSAGE);
+    this.name = "MissingImageError";
+  }
+}
+
+// Get a design's image as a data URL. There is exactly ONE source: this
+// device's IndexedDB (ImageStore), filled either by the dashboard's QUEUE_IMAGE
+// messages or by importing a batch export file, whose `images` map carries the
+// artwork inline. Nothing is ever fetched from an http(s) URL, from Supabase or
+// from Higgstee — artwork does not leave the device, so there is nowhere remote
+// to fetch it FROM. A missing image is a dead end on purpose: the item fails
+// with MISSING_IMAGE_MESSAGE, keeps its place in the queue, and is never
+// counted as an upload.
 async function imageDataUrlFor(item: QueueItem): Promise<string> {
   const stored = await ImageStore.get(item.id);
   if (stored) return stored;
-  if (item.imageUrl) return await fetchDesignAsDataUrl(item.imageUrl);
-  throw new Error("no image available for this item");
-}
-
-async function fetchDesignAsDataUrl(imageUrl: string): Promise<string> {
-  // imageUrl is an absolute, publicly-fetchable URL (Supabase Storage public
-  // bucket), so fetch it directly — no host rewriting needed.
-  const res = await fetch(imageUrl, { cache: "no-store" });
-  if (!res.ok) throw new Error(`fetch design failed: ${res.status}`);
-  const blob = await res.blob();
-  return await new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = () => reject(reader.error ?? new Error("data URL conversion failed"));
-    reader.readAsDataURL(blob);
-  });
+  throw new MissingImageError();
 }

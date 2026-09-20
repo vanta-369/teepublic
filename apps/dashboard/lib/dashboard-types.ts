@@ -206,14 +206,13 @@ export interface PeriodBreakdown {
   designs: BreakdownDesign[];
 }
 
-/** Upload-volume rollup returned by the `get_upload_stats` Postgres RPC. */
-export interface UploadStats {
-  today: number;
-  yesterday: number;
-  last7: number;
-  last30: number;
-  /** Preceding equal-length windows, so each figure can show a delta. */
-  prev7: number;
-  prev30: number;
+/**
+ * The only upload statistic the server holds: a lifetime count per account.
+ * The previous shape (today / yesterday / last7 / last30 / prev7 / prev30)
+ * was computed from a per-publish event table that no longer exists - see
+ * lib/uploadCount.ts and supabase/migrations/0009_upload_stats.sql.
+ */
+export interface UploadCountStats {
   total: number;
+  updatedAt: string | null;
 }

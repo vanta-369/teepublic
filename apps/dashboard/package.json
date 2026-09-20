@@ -8,7 +8,8 @@
     "dev:turbo": "next dev -p 3030 --turbopack",
     "build": "next build",
     "start": "next start -p 3030",
-    "lint": "next lint"
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "^1.2.6",

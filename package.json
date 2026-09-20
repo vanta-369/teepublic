@@ -12,7 +12,10 @@
     "dev:dashboard:turbo": "npm run dev:turbo --workspace=@teepublic/dashboard",
     "dev:extension": "npm run dev --workspace=@teepublic/extension",
     "build:extension": "npm run build --workspace=@teepublic/extension",
-    "build:dashboard": "npm run build --workspace=@teepublic/dashboard"
+    "build:dashboard": "npm run build --workspace=@teepublic/dashboard",
+    "test": "node tests/run.mjs",
+    "typecheck": "npm run typecheck --workspace=@teepublic/dashboard && npm run typecheck --workspace=@teepublic/extension",
+    "verify": "npm run typecheck && npm test && npm run build:extension && npm run build:dashboard"
   },
   "engines": {
     "node": ">=20"

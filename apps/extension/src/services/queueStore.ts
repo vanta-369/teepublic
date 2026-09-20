@@ -2,16 +2,26 @@
 // The store does NOT contain business logic — it just reads/writes/notifies.
 //
 // One deliberate exception: `setItemStatus` fires the fire-and-forget upload
-// report when an item reaches "succeeded". It lives here because this is the
-// single choke point every success path funnels through — the engine's happy
+// COUNT when an item reaches "succeeded". It lives here because this is the
+// single choke point every success path funnels through - the engine's happy
 // path, the content script's ITEM_STATUS / PUBLISHED_URL_DETECTED messages, the
-// tab-URL fallback poll, and the bulk run. Reporting from each caller instead
+// tab-URL fallback poll, and the bulk run. Counting from each caller instead
 // would mean four call sites and a fifth one missed on the next change. The
-// reporting logic itself stays in lib/uploadEvents.ts; this is only the hook.
+// increment itself stays in lib/uploadCounter.ts; this is only the hook.
+//
+// Note what is NOT reported: the design, its title, the listing URL. The server
+// learns that the account published one more thing, and nothing else.
 
 import type { QueueBatch, QueueItem, QueueItemStatus } from "@teepublic/shared";
-import { reportUploadEvent } from "../lib/uploadEvents";
+import { countSuccessfulUpload, resetCountedItems } from "../lib/uploadCounter";
 import { makeThumbnail } from "../lib/thumbnail";
+import {
+  OriginalsDb,
+  ThumbsDb,
+  clearAllImages,
+  getThumbsBatch,
+  migrateOne,
+} from "../lib/imageDb";
 
 const KEY = "teepublic.batch";
 const SETTINGS_KEY = "teepublic.settings";
@@ -19,7 +29,11 @@ const SETTINGS_KEY = "teepublic.settings";
 export type UploadMode = "single" | "bulk";
 
 export interface ExtensionSettings {
-  dashboardOrigin: string;        // where to fetch design files from
+  /** The Higgstee dashboard's origin. Used ONLY to open or validate a dashboard
+   *  tab (sign in, trial/upgrade links) and to recognise the dashboard that sent
+   *  a queue. It is never a source of designs, artwork or listing content —
+   *  artwork comes from this device's IndexedDB and nowhere else. */
+  dashboardOrigin: string;
   betweenItemsMinMs: number;      // min wait between items
   betweenItemsMaxMs: number;      // max wait between items
   retryMax: number;               // attempts per item
@@ -72,15 +86,11 @@ export const QueueStore = {
     const batch = await this.updateItem(itemId, { status, ...extra });
 
     if (status === "succeeded" && before?.status !== "succeeded") {
-      const item = batch?.items.find((i) => i.id === itemId);
       // Not awaited: the item has already published, and the upload loop must
-      // not wait on (or be broken by) a network round-trip. reportUploadEvent
-      // never rejects.
-      void reportUploadEvent({
-        designId: itemId,
-        publishedUrl: item?.publishedUrl ?? extra.publishedUrl,
-        title: item?.metadata?.title,
-      });
+      // not wait on (or be broken by) a network round-trip.
+      // countSuccessfulUpload never rejects, and it sends only "+1" - no
+      // design id, title or listing URL leaves the machine.
+      void countSuccessfulUpload({ itemId });
     }
 
     return batch;
@@ -161,72 +171,86 @@ export const BulkLogStore = {
   async clear(): Promise<void> { await chrome.storage.local.remove(BULK_LOG_KEY); },
 };
 
-// ── Image storage ───────────────────────────────────────────────────────────
-// Design images (multi-MB base64 data URLs for local uploads) are stored under
-// their OWN key, NOT inside the batch. Keeping them out of the batch means we
-// never rewrite all images when one changes — the O(N²) rewrite was bloating
-// chrome.storage's LevelDB until it hit FILE_ERROR_NO_SPACE.
+// -- Image storage ----------------------------------------------------------
+// Design artwork lives in IndexedDB (see lib/imageDb.ts), NOT in
+// chrome.storage.local. chrome.storage is a key/value area backed by LevelDB
+// and was never meant to hold multi-megabyte values; a batch of print-
+// resolution PNGs there ran the area out of space (FILE_ERROR_NO_SPACE), and
+// its change events hand every listener the whole new value, so any open page
+// received each image as it streamed in.
 //
-// ImageStore holds the ORIGINAL, full-resolution artwork — the exact bytes
-// handed to TeePublic (automationEngine.resolveImageDataUrl → the content
-// script's dataUrlToFile). It is NEVER resized or re-encoded. Grid previews are
-// a separate, additional small copy in ThumbStore; see lib/thumbnail.ts.
-const IMG_PREFIX = "teepublic.img.";
-const THUMB_PREFIX = "teepublic.thumb.";
+// ImageStore holds the ORIGINAL, full-resolution artwork - the exact bytes
+// handed to the marketplace (automationEngine.resolveImageDataUrl -> the
+// content script's dataUrlToFile). It is NEVER resized or re-encoded. Grid
+// previews are a separate, additional small copy in ThumbStore.
+//
+// The API is unchanged (data URLs in, data URLs out) so callers did not have to
+// learn about Blobs; the conversion happens at the storage boundary.
 
 export const ImageStore = {
   async set(itemId: string, dataUrl: string): Promise<void> {
-    await chrome.storage.local.set({ [IMG_PREFIX + itemId]: dataUrl });
+    await OriginalsDb.put(itemId, dataUrl);
   },
   async get(itemId: string): Promise<string | null> {
-    const key = IMG_PREFIX + itemId;
-    const all = await chrome.storage.local.get(key);
-    return (all[key] as string | undefined) ?? null;
+    const hit = await OriginalsDb.get(itemId);
+    if (hit) return hit;
+    // A batch queued before artwork moved to IndexedDB: pull it across now
+    // rather than failing an upload that has everything it needs.
+    await migrateOne(itemId);
+    return OriginalsDb.get(itemId);
   },
   async remove(itemId: string): Promise<void> {
     // The preview is deliberately NOT removed with the original: a succeeded
     // item frees its (huge) artwork but should still show its tile in the grid,
     // and a ~30 KB preview costs nothing to keep.
-    await chrome.storage.local.remove(IMG_PREFIX + itemId);
+    await OriginalsDb.delete(itemId);
   },
   async clearAll(): Promise<void> {
-    await removeByPrefix(IMG_PREFIX);
+    await OriginalsDb.clear();
   },
 };
 
-// ── Preview (thumbnail) storage ─────────────────────────────────────────────
+// -- Preview (thumbnail) storage ---------------------------------------------
 // A small WebP copy of each design, ~320px on its longest edge, used ONLY to
 // paint grid tiles. Written by the background worker right after the original
 // lands (and lazily backfilled by getDisplayImages for batches queued before
 // previews existed). Never read by the upload path.
+
+/** A few bytes in chrome.storage announcing which preview just landed.
+ *  IndexedDB has no cross-context change event, and this carries an id and a
+ *  timestamp - never image data - so the old "every listener gets the whole
+ *  value" problem cannot come back. */
+const THUMB_TICK_KEY = "teepublic.thumbtick";
+
 export const ThumbStore = {
   async set(itemId: string, dataUrl: string): Promise<void> {
-    await chrome.storage.local.set({ [THUMB_PREFIX + itemId]: dataUrl });
+    await ThumbsDb.put(itemId, dataUrl);
+    await chrome.storage.local.set({ [THUMB_TICK_KEY]: { itemId, at: Date.now() } });
   },
   async get(itemId: string): Promise<string | null> {
-    const key = THUMB_PREFIX + itemId;
-    const all = await chrome.storage.local.get(key);
-    return (all[key] as string | undefined) ?? null;
+    const hit = await ThumbsDb.get(itemId);
+    if (hit) return hit;
+    await migrateOne(itemId);
+    return ThumbsDb.get(itemId);
   },
   async remove(itemId: string): Promise<void> {
-    await chrome.storage.local.remove(THUMB_PREFIX + itemId);
+    await ThumbsDb.delete(itemId);
   },
   async clearAll(): Promise<void> {
-    await removeByPrefix(THUMB_PREFIX);
+    await ThumbsDb.clear();
   },
 
-  // Notify when a preview is written. Previews stream in one at a time (the
-  // dashboard sends QUEUE_IMAGE per design, and each triggers one generation)
-  // AFTER the batch is stored, so a page rendering tiles needs this to fill them
-  // in live — the batch KEY that QueueStore watches never changes when an image
-  // lands under its own key.
+  /** Notify when a preview is written. Previews stream in one at a time (the
+   *  dashboard sends QUEUE_IMAGE per design, and each triggers one generation)
+   *  AFTER the batch is stored, so a page rendering tiles needs this to fill
+   *  them in live. The callback receives the id; it reads the image itself. */
   installChangeListener(fn: (itemId: string, dataUrl: string | null) => void): () => void {
     const handler = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
-      if (area !== "local") return;
-      for (const key of Object.keys(changes)) {
-        if (!key.startsWith(THUMB_PREFIX)) continue;
-        fn(key.slice(THUMB_PREFIX.length), (changes[key].newValue as string | undefined) ?? null);
-      }
+      if (area !== "local" || !(THUMB_TICK_KEY in changes)) return;
+      const next = changes[THUMB_TICK_KEY].newValue as { itemId?: string } | undefined;
+      const id = next?.itemId;
+      if (!id) return;
+      void ThumbsDb.get(id).then((dataUrl) => fn(id, dataUrl));
     };
     chrome.storage.onChanged.addListener(handler);
     return () => chrome.storage.onChanged.removeListener(handler);
@@ -235,43 +259,28 @@ export const ThumbStore = {
 
 /** Wipe every stored image AND preview. Called on "Clear queue". */
 export async function clearAllImageData(): Promise<void> {
-  await removeByPrefix(IMG_PREFIX, THUMB_PREFIX);
-}
-
-/** Remove every key under the given prefixes.
- *  Uses storage.getKeys() when the browser has it (Chrome 130+) so we don't have
- *  to pull every multi-MB image VALUE into memory just to learn its key name —
- *  the old get(null) did exactly that and could hang "Clear queue" on a big
- *  batch. Older Chrome falls back to the read-everything path. */
-async function removeByPrefix(...prefixes: string[]): Promise<void> {
-  const area = chrome.storage.local as chrome.storage.LocalStorageArea & {
-    getKeys?: () => Promise<string[]>;
-  };
-  const keys = typeof area.getKeys === "function"
-    ? await area.getKeys()
-    : Object.keys(await chrome.storage.local.get(null));
-  const doomed = keys.filter((k) => prefixes.some((p) => k.startsWith(p)));
-  if (doomed.length) await chrome.storage.local.remove(doomed);
+  await clearAllImages();
+  await chrome.storage.local.remove(THUMB_TICK_KEY);
+  // Clearing the queue retires those item ids, so the dedupe record for them is
+  // dead weight. A fresh queue gets fresh ids, so this cannot cause a re-count.
+  await resetCountedItems();
 }
 
 /** Resolve the images a grid should paint, for one page of item ids.
  *
- *  Previews first, in ONE batched storage read — the old code awaited a separate
- *  chrome.storage.local.get per tile, so every tile cost its own IPC round trip
- *  carrying a multi-MB string.
- *
- *  Anything without a preview yet (a batch queued before previews existed) is
- *  backfilled here: read the original ONE AT A TIME, downscale it once, store
- *  the result. That keeps at most a single full-resolution string in memory, and
- *  the page pays it only the first time it ever shows that design. */
+ *  Previews first, in ONE batched read. Anything without a preview yet (a batch
+ *  queued before previews existed, or one still in chrome.storage) is backfilled
+ *  here: read the original ONE AT A TIME, downscale it once, store the result.
+ *  That keeps at most a single full-resolution string in memory, and the page
+ *  pays it only the first time it ever shows that design. */
 export async function getDisplayImages(ids: string[]): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   if (ids.length === 0) return out;
 
-  const stored = await chrome.storage.local.get(ids.map((id) => THUMB_PREFIX + id));
+  const stored = await getThumbsBatch(ids);
   const missing: string[] = [];
   for (const id of ids) {
-    const thumb = stored[THUMB_PREFIX + id] as string | undefined;
+    const thumb = stored.get(id);
     if (thumb) out.set(id, thumb);
     else missing.push(id);
   }
@@ -284,7 +293,7 @@ export async function getDisplayImages(ids: string[]): Promise<Map<string, strin
       await ThumbStore.set(id, thumb);
       out.set(id, thumb);
     } else {
-      out.set(id, full); // couldn't downscale — correct, just heavy
+      out.set(id, full); // couldn't downscale - correct, just heavy
     }
   }
   return out;

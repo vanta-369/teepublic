@@ -12,9 +12,11 @@ function escapeHtml(s: string): string {
 
 function tileHtml(item: QueueItem): string {
   const selected = item.selected !== false;
-  // Image lives in ImageStore (its own key), not item.imageUrl — load it after
-  // render via loadThumbnails. Fall back to item.imageUrl if it's a real URL.
-  const srcAttr = item.imageUrl ? `src="${escapeHtml(item.imageUrl)}"` : `data-img-id="${escapeHtml(item.id)}"`;
+  // Image lives in ImageStore (its own key), not item.imageUrl — loadThumbnails
+  // fills it in after render. There is deliberately no src fallback to
+  // item.imageUrl: the only artwork this extension shows is the copy on this
+  // device, never something the browser goes and fetches.
+  const srcAttr = `data-img-id="${escapeHtml(item.id)}"`;
   return `
     <div class="tile ${selected ? "selected" : ""}" data-id="${item.id}" title="${escapeHtml(item.metadata.title)}">
       <img ${srcAttr} alt="${escapeHtml(item.metadata.title)}" onerror="this.style.opacity=0.2" />

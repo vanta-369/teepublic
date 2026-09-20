@@ -1,5 +1,14 @@
 # TeePublic Uploader — SaaS Access Architecture
 
+> **OUT OF DATE IN ONE IMPORTANT RESPECT.** This document describes designs,
+> spreadsheet batches and artwork as living in Supabase (tables `designs`,
+> `spreadsheet_batches`, and a Storage bucket named `designs`). They no longer
+> do: all of it is stored locally in the user's browser, and Supabase holds only
+> account/access data plus one aggregate upload count per user. See
+> **Local-first data** in `CLAUDE.md`, `apps/dashboard/lib/localDb.ts`, and
+> migrations `0009`–`0011`. The rest of this document — auth, access resolution,
+> the admin RPCs — still applies.
+
 Production-ready access-management design for the dashboard (Next.js 15 on Vercel),
 the Chrome extension (MV3), and Supabase. **No payment gateway is wired up** — but
 the schema and the access layer are shaped so Stripe, Paddle, or Lemon Squeezy can

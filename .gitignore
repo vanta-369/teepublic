@@ -17,3 +17,6 @@ apps/dashboard/.auth
 # Vendored/dev tooling and stray archives — not part of the product.
 *.rar
 .superpowers/
+
+# Test-run artefacts (esbuild bundles produced by tests/run.mjs)
+tests/.build/

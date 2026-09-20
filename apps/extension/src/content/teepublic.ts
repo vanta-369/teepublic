@@ -1123,7 +1123,8 @@ function pageShowsText(rx: RegExp): boolean {
 const MIN_WIDTH = 1500;
 const MIN_HEIGHT = 1995;
 
-/** Read an image's pixel dimensions from a data/URL. Null if it can't load. */
+/** Read an image's pixel dimensions from a data: URL — the only form artwork
+ *  ever takes here, since it is read from local storage. Null if it can't load. */
 function imageDimensions(src: string): Promise<{ w: number; h: number } | null> {
   return new Promise((resolve) => {
     const img = new Image();

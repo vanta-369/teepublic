@@ -8,8 +8,17 @@ import type { QueueBatch } from "@teepublic/shared";
 import { QueueStore, SettingsStore, clearAllImageData, storeImageWithThumbnail } from "../services/queueStore";
 import { engine } from "../services/automationEngine";
 import { assertCanAccess, AccessDeniedError } from "../lib/access";
+import { migrateLegacyImages } from "../lib/imageDb";
 
 console.info("[teepublic] background ready");
+
+// Artwork used to live in chrome.storage.local as base64 data URLs. It now
+// lives in IndexedDB (lib/imageDb.ts). Sweep anything left behind out of
+// chrome.storage on every wake-up - one design at a time, so a large legacy
+// batch never sits in memory at once. A no-op once the keys are gone.
+void migrateLegacyImages()
+  .then((moved) => moved && console.info(`[teepublic] moved ${moved} stored image(s) to IndexedDB`))
+  .catch((e) => console.warn("[teepublic] image migration failed", e));
 
 // Open the side panel when the toolbar icon is clicked (the UI is now a side
 // panel, not a popup). Guarded so older Chrome without sidePanel won't throw.
@@ -61,7 +70,10 @@ chrome.runtime.onInstalled.addListener(async () => {
 chrome.runtime.onMessageExternal.addListener((message: DashboardToExtensionMessage, sender, sendResponse) => {
   (async () => {
     try {
-      // Capture the dashboard origin so the extension knows where to fetch images.
+      // Remember which Higgstee origin this dashboard is, so the side panel and
+      // popup can open sign-in / upgrade tabs there. It is NOT an image source:
+      // artwork arrives over QUEUE_IMAGE (or a batch import) and lives in this
+      // device's IndexedDB.
       if (sender.origin) await SettingsStore.set({ dashboardOrigin: sender.origin });
 
       switch (message.type) {

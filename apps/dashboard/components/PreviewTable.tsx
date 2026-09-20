@@ -7,10 +7,13 @@ import type { DesignMetadata } from "@teepublic/shared";
 interface Props {
   rows: ParsedRow[];
   images: Map<string, MatchedImage>;       // keyed by stem
+  /** Object URLs over the artwork in this device's IndexedDB, keyed by stem.
+   *  A MatchedImage carries no URL and no bytes - see lib/spreadsheetStore.ts. */
+  previewUrls?: Map<string, string>;
   onRemove: (stem: string) => void;
 }
 
-export function PreviewTable({ rows, images, onRemove }: Props) {
+export function PreviewTable({ rows, images, previewUrls, onRemove }: Props) {
   if (rows.length === 0) return null;
 
   return (
@@ -40,9 +43,9 @@ export function PreviewTable({ rows, images, onRemove }: Props) {
                 <tr key={row.rowNumber} className="border-t border-white/5 hover:bg-white/[0.02] transition">
                   <td className="px-5 py-3">
                     <div className="h-12 w-12 rounded-lg overflow-hidden bg-ink-800 grid place-items-center ring-1 ring-white/5">
-                      {img ? (
+                      {img && previewUrls?.get(stem) ? (
                         // eslint-disable-next-line @next/next/no-img-element
-                        <img src={img.url} alt={row.metadata.title} className="w-full h-full object-contain" />
+                        <img src={previewUrls.get(stem)} alt={row.metadata.title} className="w-full h-full object-contain" />
                       ) : (
                         <span className="text-zinc-500 text-[10px]">no img</span>
                       )}

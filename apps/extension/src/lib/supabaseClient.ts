@@ -8,6 +8,7 @@
 // every time (see access.ts). We never trust extension storage for entitlement.
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { assertNoImageBytes, assertNoListingContent, bodyForInspection } from "@teepublic/shared";
 import { SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_CONFIGURED } from "./config";
 
 // A Storage adapter over chrome.storage.local, because there is no localStorage
@@ -20,6 +21,29 @@ const chromeStorage = {
   removeItem: (key: string): Promise<void> => chrome.storage.local.remove(key),
 };
 
+/**
+ * A fetch that cannot carry artwork or listing content to Supabase.
+ *
+ * The extension handles both constantly - it holds the queue, the titles, the
+ * tags and the design bytes - and it talks to Supabase for auth, the access
+ * check and the upload counter. This makes the separation structural rather
+ * than a convention: a future change that tried to send a listing here fails
+ * loudly instead of quietly shipping. Auth traffic is exempt because it
+ * legitimately carries JWTs, which look like long base64 to any heuristic.
+ */
+const guardedFetch: typeof fetch = (input, init) => {
+  const url =
+    typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+  if (!/\/auth\/v1\//.test(url)) {
+    const payload = bodyForInspection(init?.body as unknown);
+    if (payload !== undefined) {
+      assertNoImageBytes(`Supabase request to ${url}`, payload);
+      assertNoListingContent(`Supabase request to ${url}`, payload);
+    }
+  }
+  return fetch(input, init);
+};
+
 let client: SupabaseClient | null = null;
 
 export function supabase(): SupabaseClient {
@@ -30,6 +54,7 @@ export function supabase(): SupabaseClient {
   }
   if (client) return client;
   client = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    global: { fetch: guardedFetch },
     auth: {
       storage: chromeStorage,
       storageKey: "teepublic.auth",

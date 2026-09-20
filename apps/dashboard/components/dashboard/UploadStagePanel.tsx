@@ -8,13 +8,17 @@
 // makes them durable. Titles can be edited one by one or across the whole
 // selection before anything leaves the dashboard.
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { nanoid } from "nanoid";
 import type { QueueBatch, QueueItem } from "@teepublic/shared";
 import { EmptyState } from "@/components/dashboard/DashBits";
 import type { PersistedDesign } from "@/lib/designsStore";
-import { loadDesigns } from "@/lib/designsStore";
-import { buildExportChunks, downloadExportChunks, importExportFiles } from "@/lib/batchTransfer";
+import {
+  loadDesigns,
+  getDesignImageDataUrl,
+  getDesignImageObjectUrl,
+} from "@/lib/designsStore";
+import { buildExportChunks, downloadExportChunks, importExportFilesToLocal } from "@/lib/batchTransfer";
 import { getExtensionId, isExtensionAvailable, sendQueueToExtension } from "@/lib/bridge";
 
 /** Fired after a successful send so the live queue panel re-reads immediately. */
@@ -43,7 +47,9 @@ function designToItem(d: PersistedDesign): QueueItem {
       productColors: { ...(d.config?.productColors ?? {}) },
       enabledProducts: [...(d.config?.enabledProducts ?? [])],
     },
-    imageUrl: d.imageUrl,
+    // Artwork is not carried on the item: it is read from this device's
+    // IndexedDB by id at the moment it is sent or exported.
+    imageUrl: "",
     imageMime: d.mime,
     imageSizeBytes: d.size,
     status: "pending",
@@ -66,8 +72,31 @@ export function UploadStagePanel() {
   const [titleValue, setTitleValue] = useState("");
   const [titleFind, setTitleFind] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
+  // Preview URLs over the Blobs in this device's IndexedDB, keyed by item id.
+  const [thumbs, setThumbs] = useState<Record<string, string>>({});
 
   const selected = useMemo(() => items.filter((i) => i.selected !== false), [items]);
+  const stagedIds = useMemo(() => items.map((i) => i.id).join(","), [items]);
+
+  // Artwork for the staged tiles. Object URLs are revoked when the staged set
+  // changes, so editing a long list does not leak a blob per design.
+  useEffect(() => {
+    let cancelled = false;
+    const created: string[] = [];
+    (async () => {
+      const next: Record<string, string> = {};
+      for (const id of stagedIds ? stagedIds.split(",") : []) {
+        const url = await getDesignImageObjectUrl(id).catch(() => null);
+        if (url) { next[id] = url; created.push(url); }
+      }
+      if (cancelled) { created.forEach(URL.revokeObjectURL); return; }
+      setThumbs(next);
+    })();
+    return () => {
+      cancelled = true;
+      created.forEach(URL.revokeObjectURL);
+    };
+  }, [stagedIds]);
   const untitled = useMemo(() => selected.filter((i) => !i.metadata.title.trim()).length, [selected]);
 
   const merge = useCallback((incoming: QueueItem[]) => {
@@ -109,9 +138,11 @@ export function UploadStagePanel() {
     ev.target.value = ""; // allow re-importing the same files
     if (files.length === 0) return;
     void run("import", async () => {
-      const { items: imported, errors } = await importExportFiles(files);
-      merge(imported);
-      const summary = `Imported ${imported.length} design(s) from ${files.length} file(s).`;
+      // An export file inlines each design's artwork; the import moves it into
+      // this device's IndexedDB and hands back metadata-only items.
+      const { items: staged, errors } = await importExportFilesToLocal(files);
+      merge(staged);
+      const summary = `Imported ${staged.length} design(s) from ${files.length} file(s).`;
       if (errors.length) setError(`${summary} Skipped: ${errors.join("; ")}`);
       else setNotice(summary);
     });
@@ -120,7 +151,9 @@ export function UploadStagePanel() {
   function exportStaged() {
     return run("export", async () => {
       const batch = toBatch(items, "staged export");
-      const chunks = await buildExportChunks(batch);
+      const chunks = await buildExportChunks(batch, undefined, (item) =>
+        getDesignImageDataUrl(item.id),
+      );
       await downloadExportChunks(chunks);
       setNotice(
         chunks.length > 1
@@ -137,7 +170,11 @@ export function UploadStagePanel() {
       }
       if (selected.length === 0) throw new Error("Select at least one design to send.");
       if (untitled > 0) throw new Error(`${untitled} selected design(s) have no title — set one first.`);
-      await sendQueueToExtension(toBatch(selected, `Uploads (${selected.length})`));
+      await sendQueueToExtension(
+        toBatch(selected, `Uploads (${selected.length})`),
+        undefined,
+        (item) => getDesignImageDataUrl(item.id),
+      );
       setNotice(`Sent ${selected.length} design(s) to the extension. Start the run below.`);
       window.dispatchEvent(new CustomEvent(QUEUE_CHANGED_EVENT));
     });
@@ -314,9 +351,9 @@ export function UploadStagePanel() {
                     className="relative aspect-square rounded-lg overflow-hidden bg-ink-800 border border-ink-700 cursor-pointer"
                     onClick={() => toggle(item.id)}
                   >
-                    {item.imageUrl ? (
+                    {thumbs[item.id] ? (
                       // eslint-disable-next-line @next/next/no-img-element
-                      <img src={item.imageUrl} alt="" className="h-full w-full object-contain" />
+                      <img src={thumbs[item.id]} alt="" className="h-full w-full object-contain" />
                     ) : (
                       <div className="h-full w-full grid place-items-center text-2xl text-zinc-600">🖼</div>
                     )}

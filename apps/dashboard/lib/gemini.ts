@@ -139,14 +139,6 @@ export async function fileToBase64(file: File): Promise<string> {
   return bytesToBase64(new Uint8Array(await file.arrayBuffer()));
 }
 
-// For designs rehydrated from the database we no longer have the original File,
-// only the stored image URL — fetch it and encode the bytes the same way.
-export async function urlToBase64(url: string): Promise<string> {
-  const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) throw new Error(`fetch image failed: ${res.status}`);
-  return bytesToBase64(new Uint8Array(await res.arrayBuffer()));
-}
-
 function bytesToBase64(bytes: Uint8Array): string {
   // btoa handles 8-bit strings only; build one chunk-wise to avoid stack blow-up.
   let binary = "";

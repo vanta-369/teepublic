@@ -50,14 +50,23 @@ export async function assertCanGenerate(): Promise<AccessState> {
   return access;
 }
 
-/** Best-effort audit log of a generation event. Never throws. */
+/**
+ * Best-effort audit log of a generation ATTEMPT AND ITS OUTCOME. Never throws.
+ *
+ * The status is all that is recorded. Callers may pass details for their own
+ * readability, but nothing from `meta` is transmitted: a generation touches the
+ * user's artwork and produces their listing copy, and neither - nor any id that
+ * points at them - belongs in a server-side log. What remains is the access
+ * decision, which is account data: whether this account was allowed to use a
+ * paid feature, and whether the call worked.
+ */
 export async function logGeneration(
   status: "attempt" | "success" | "denied" | "failed",
-  meta: Record<string, unknown> = {},
+  _meta: Record<string, unknown> = {},
 ): Promise<void> {
   try {
     const supabase = createClient();
-    await supabase.rpc("log_generation", { p_status: status, p_meta: meta });
+    await supabase.rpc("log_generation", { p_status: status, p_meta: {} });
   } catch {
     /* logging must never block generation */
   }

@@ -3,20 +3,22 @@
 // Mirrors the extension's upload queue on the dashboard. The extension owns the
 // queue: every read is a live QUEUE_STATE round-trip and every button asks the
 // extension to mutate it, so this panel and the side panel can never disagree.
-// Images are NOT sent back over the wire (they live in the extension's
-// ImageStore); thumbnails come from the URL map bridge.ts saved when the queue
-// was sent from this browser.
+// Images are NOT sent back over the wire (they live in the extension's own
+// storage). Thumbnails are read from THIS device's IndexedDB by item id, so a
+// queue sent from this browser shows artwork and one sent from another device
+// shows placeholders - nothing about a listing is mirrored anywhere to make
+// that work.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { QueueItem, QueueItemStatus, QueueStateData } from "@teepublic/shared";
 import { EmptyState } from "@/components/dashboard/DashBits";
 import { QUEUE_CHANGED_EVENT } from "@/components/dashboard/UploadStagePanel";
+import { getDesignImageObjectUrl } from "@/lib/designsStore";
 import {
   isExtensionAvailable,
   getExtensionId,
   fetchQueueState,
-  getQueueThumbs,
   startQueue,
   pauseQueue,
   clearQueue,
@@ -100,7 +102,6 @@ export function UploadQueuePanel() {
 
   useEffect(() => {
     setChromePresent(isExtensionAvailable());
-    setThumbs(getQueueThumbs());
     void refresh();
 
     const id = window.setInterval(() => {
@@ -109,7 +110,7 @@ export function UploadQueuePanel() {
       void refresh();
     }, POLL_MS);
     const onVisible = () => document.visibilityState === "visible" && void refresh();
-    const onQueueChanged = () => { setThumbs(getQueueThumbs()); void refresh(); };
+    const onQueueChanged = () => { void refresh(); };
     document.addEventListener("visibilitychange", onVisible);
     window.addEventListener(QUEUE_CHANGED_EVENT, onQueueChanged);
     return () => {
@@ -118,6 +119,32 @@ export function UploadQueuePanel() {
       window.removeEventListener(QUEUE_CHANGED_EVENT, onQueueChanged);
     };
   }, [refresh]);
+
+  // Artwork for the visible cards, straight from local storage. Object URLs are
+  // revoked when the queue changes so a long session doesn't leak one blob per
+  // design it has ever displayed.
+  const itemIds = useMemo(
+    () => (state?.batch?.items ?? []).map((i) => i.id).join(","),
+    [state],
+  );
+  useEffect(() => {
+    let cancelled = false;
+    const created: string[] = [];
+    (async () => {
+      const ids = itemIds ? itemIds.split(",") : [];
+      const next: Record<string, string> = {};
+      for (const id of ids) {
+        const url = await getDesignImageObjectUrl(id).catch(() => null);
+        if (url) { next[id] = url; created.push(url); }
+      }
+      if (cancelled) { created.forEach(URL.revokeObjectURL); return; }
+      setThumbs(next);
+    })();
+    return () => {
+      cancelled = true;
+      created.forEach(URL.revokeObjectURL);
+    };
+  }, [itemIds]);
 
   async function run(action: () => Promise<void>) {
     setBusy(true);

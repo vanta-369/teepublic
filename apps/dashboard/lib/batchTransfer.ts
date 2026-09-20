@@ -7,13 +7,18 @@
 
 import type { QueueBatch, QueueItem, BatchExportFile } from "@teepublic/shared";
 import { EXPORT_FORMAT, EXPORT_VERSION, CHUNK_SIZE } from "@teepublic/shared";
+import { saveDesignImage } from "@/lib/designsStore";
 
 /** Split a batch into export files, inlining every item's artwork as a data URL.
- *  Remote (Supabase Storage) URLs are fetched so the file still works on a
- *  machine that can't reach them. */
+ *
+ *  `resolveImage` reads the bytes from this device's IndexedDB. Artwork is not
+ *  carried on the queue item any more (it has no URL to fetch and no server to
+ *  fetch it from), so the export file IS the way to move designs between
+ *  machines - which is why it is also the only thing that now crosses devices. */
 export async function buildExportChunks(
   batch: QueueBatch,
   chunkSize = CHUNK_SIZE,
+  resolveImage?: (item: QueueItem) => Promise<string | null>,
 ): Promise<BatchExportFile[]> {
   if (batch.items.length === 0) throw new Error("Nothing to export — no designs staged.");
 
@@ -25,10 +30,13 @@ export async function buildExportChunks(
     const slice = batch.items.slice(p * chunkSize, (p + 1) * chunkSize);
     const images: Record<string, string> = {};
     for (const item of slice) {
-      if (!item.imageUrl) continue;
-      const dataUrl = item.imageUrl.startsWith("data:")
-        ? item.imageUrl
-        : await fetchAsDataUrl(item.imageUrl).catch(() => null);
+      // Two local sources, in order: this device's IndexedDB, then an image
+      // already inlined on the item as a data URL. There is deliberately no
+      // third, remote source — artwork never leaves the device, so there is no
+      // URL to fetch it back from.
+      const local = await resolveImage?.(item).catch(() => null);
+      const inline = item.imageUrl?.startsWith("data:") ? item.imageUrl : null;
+      const dataUrl = local ?? inline;
       if (dataUrl) images[item.id] = dataUrl;
     }
     chunks.push({
@@ -75,7 +83,10 @@ export function parseExportFile(raw: unknown): QueueItem[] {
   const now = Date.now();
   return data.batch.items.map((it: QueueItem) => ({
     ...it,
-    imageUrl: it.imageUrl || images[it.id] || "",
+    // The `images` map is the artwork source; an older file that inlined a data
+    // URL on the item is still honoured. An http(s) URL is not — it would be a
+    // remote image source, and there is no longer any such thing.
+    imageUrl: images[it.id] || (it.imageUrl?.startsWith("data:") ? it.imageUrl : ""),
     status: "pending" as const,
     selected: it.selected !== false,
     attempts: 0,
@@ -104,14 +115,28 @@ export async function importExportFiles(
   return { items: [...byId.values()], errors };
 }
 
-async function fetchAsDataUrl(url: string): Promise<string> {
-  const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) throw new Error(`fetch failed: ${res.status}`);
-  const blob = await res.blob();
-  return await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = () => reject(reader.error ?? new Error("data URL conversion failed"));
-    reader.readAsDataURL(blob);
-  });
+/** Import export files and land them on THIS device: each design's inlined
+ *  artwork is moved into IndexedDB (keyed by design id) and the inline copy is
+ *  dropped, so the staged list stays metadata-only and the artwork survives a
+ *  reload. Nothing here touches the network — the `images` map in the file is
+ *  the only image source, which is what makes an imported batch upload-ready
+ *  offline and without Supabase. */
+export async function importExportFilesToLocal(
+  files: File[],
+): Promise<{ items: QueueItem[]; images: number; errors: string[] }> {
+  const { items, errors } = await importExportFiles(files);
+  const staged: QueueItem[] = [];
+  let images = 0;
+  for (const it of items) {
+    if (it.imageUrl?.startsWith("data:")) {
+      try {
+        await saveDesignImage(it.id, it.imageUrl);
+        images++;
+      } catch (e) {
+        errors.push(`${it.metadata.title || it.id}: ${e instanceof Error ? e.message : "image not saved"}`);
+      }
+    }
+    staged.push({ ...it, imageUrl: "" });
+  }
+  return { items: staged, images, errors };
 }

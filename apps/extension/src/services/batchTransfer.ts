@@ -21,9 +21,10 @@ export { EXPORT_FORMAT, EXPORT_VERSION, CHUNK_SIZE };
 export type { BatchExportFile };
 
 /** Gather the current batch into chunk files of CHUNK_SIZE designs each, with
- *  every item's image inlined. Items whose image only exists as a remote URL are
- *  fetched and inlined so the file works even when the destination profile can't
- *  reach that URL. */
+ *  every item's image inlined from this profile's ImageStore (IndexedDB). That
+ *  local copy is the ONLY source: there is no remote URL to fall back to, by
+ *  design. An item with no stored artwork is exported metadata-only and simply
+ *  has no entry in `images`. */
 export async function buildBatchExportChunks(chunkSize = CHUNK_SIZE): Promise<BatchExportFile[]> {
   const batch = await QueueStore.get();
   if (!batch || batch.items.length === 0) {
@@ -39,8 +40,7 @@ export async function buildBatchExportChunks(chunkSize = CHUNK_SIZE): Promise<Ba
     const slice = items.slice(p * chunkSize, (p + 1) * chunkSize);
     const images: Record<string, string> = {};
     for (const item of slice) {
-      let dataUrl = await ImageStore.get(item.id);
-      if (!dataUrl && item.imageUrl) dataUrl = await fetchAsDataUrl(item.imageUrl).catch(() => null);
+      const dataUrl = await ImageStore.get(item.id);
       if (dataUrl) images[item.id] = dataUrl;
     }
     chunks.push({
@@ -49,7 +49,9 @@ export async function buildBatchExportChunks(chunkSize = CHUNK_SIZE): Promise<Ba
       exportedAt,
       part: p + 1,
       totalParts,
-      batch: { ...batch, items: slice },
+      // Items are exported WITHOUT an inline image: the artwork travels once,
+      // in `images`, keyed by item id — the same shape the dashboard writes.
+      batch: { ...batch, items: slice.map((i) => ({ ...i, imageUrl: "" })) },
       images,
     });
   }
@@ -69,6 +71,9 @@ export async function applyBatchImport(raw: unknown): Promise<{ items: number; i
   const now = Date.now();
   const incoming: QueueItem[] = data.batch.items.map((it: QueueItem) => ({
     ...it,
+    // Artwork belongs in the ImageStore, keyed by id — never on the item. This
+    // also guarantees that no URL from the file can become an image source.
+    imageUrl: "",
     // Fresh start in the destination account — don't carry over the source
     // profile's progress (succeeded/failed/published URL/attempts).
     status: "pending",
@@ -90,7 +95,15 @@ export async function applyBatchImport(raw: unknown): Promise<{ items: number; i
     : { ...data.batch, items: incoming };
   await QueueStore.set(mergedBatch);
 
-  const images = data.images ?? {};
+  // The file's `images` map is the artwork source. An older file that inlined a
+  // data URL on the item instead is still honoured — but only a data URL, never
+  // an http(s) one.
+  const images: Record<string, string> = { ...(data.images ?? {}) };
+  for (const it of data.batch.items) {
+    if (!images[it.id] && typeof it.imageUrl === "string" && it.imageUrl.startsWith("data:")) {
+      images[it.id] = it.imageUrl;
+    }
+  }
   let imageCount = 0;
   for (const [itemId, dataUrl] of Object.entries(images)) {
     if (typeof dataUrl === "string" && dataUrl) {
@@ -102,16 +115,4 @@ export async function applyBatchImport(raw: unknown): Promise<{ items: number; i
   }
 
   return { items: incoming.length, images: imageCount, part: data.part, totalParts: data.totalParts };
-}
-
-async function fetchAsDataUrl(url: string): Promise<string> {
-  const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) throw new Error(`fetch failed: ${res.status}`);
-  const blob = await res.blob();
-  return await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = () => reject(reader.error ?? new Error("data URL conversion failed"));
-    reader.readAsDataURL(blob);
-  });
 }
