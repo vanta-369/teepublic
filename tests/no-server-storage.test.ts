@@ -233,12 +233,19 @@ test("the extension's host access is limited to its own site, Supabase and TeePu
   // Supabase wildcard to the one project and adds localhost only under --watch.
   assert.deepEqual(manifest.host_permissions.sort(), [
     "https://*.supabase.co/*",
-    "https://*.teepublic.com/*",
     "https://www.higgstee.com/*",
+    "https://www.teepublic.com/*",
   ]);
   // www only: higgstee.com 308-redirects to www, so no page is ever SERVED at
   // the apex and nothing there should be able to message the extension.
   assert.deepEqual(manifest.externally_connectable.matches, ["https://www.higgstee.com/*"]);
+
+  // No wildcard subdomain: teepublic.com 301s to www, every page the content
+  // script drives is on www, and "*.teepublic.com" is what makes the Chrome Web
+  // Store flag the package for in-depth review.
+  for (const cs of manifest.content_scripts) {
+    assert.deepEqual(cs.matches, ["https://www.teepublic.com/*"]);
+  }
 });
 
 test("the production manifest carries no development origin", () => {
