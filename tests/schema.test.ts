@@ -197,7 +197,99 @@ test("no migration after 0008 creates a table holding listing content", () => {
     const exec = executable(sql(f));
     const creates = [...exec.matchAll(/create table if not exists public\.(\w+)/g)].map((m) => m[1]);
     for (const table of creates) {
-      assert.equal(table, "upload_stats", `${f} creates unexpected table "${table}"`);
+      // upload_stats (0009) and projects (0013: a project name + its count) are
+      // the only tables allowed after 0008 - neither holds listing content.
+      assert.ok(["upload_stats", "projects"].includes(table), `${f} creates unexpected table "${table}"`);
     }
   }
+});
+
+// ── 0012: paid plans end with their subscription period ─────────────────────
+
+test("0012: the latest compute_access expires an ended paid plan and never grants from the stored status", () => {
+  const latest = files.filter((f) => /create or replace function public\.compute_access/.test(sql(f))).pop();
+  assert.equal(latest, "0012_expire_paid_plans.sql", "compute_access must be (re)defined last by 0012");
+  const exec = executable(sql(latest!));
+  const branches = exec.slice(exec.indexOf("eff := case"), exec.indexOf("end;", exec.indexOf("eff := case")));
+  // A pro plan with no current period is expired...
+  assert.match(branches, /when p\.plan in \('pro_monthly','pro_yearly'\)\s+then 'expired'/);
+  // ...and a stored 'active'/'trialing' that no branch backed cannot grant access.
+  assert.match(branches, /when p\.account_status in \('active','trialing'\)\s+then 'expired'/);
+  const fallback = branches.slice(branches.lastIndexOf("else"));
+  assert.ok(branches.indexOf("then 'active'") < branches.lastIndexOf("else"));
+  assert.ok(!/'active'|'trialing'/.test(fallback.replace(/account_status/g, "")), "ELSE must not yield a granting status literal");
+  // can_access still comes only from the effective status.
+  assert.match(exec, /'can_access',\s+eff in \('trialing','active'\)/);
+});
+
+test("0012 modifies no data", () => {
+  const exec = executable(sql("0012_expire_paid_plans.sql"));
+  assert.ok(!/(update|delete|insert|drop|truncate|alter)/i.test(exec), "0012 must only replace the function");
+});
+
+// ── 0013: projects - a name and a count, nothing about designs ──────────────
+
+const PROJECTS = files.includes("0013_projects.sql") ? sql("0013_projects.sql") : "";
+
+test("0013: projects declares exactly id, user_id, name, upload_count and timestamps", () => {
+  const body = /create table if not exists public\.projects \(([\s\S]*?)\n\);/.exec(PROJECTS)?.[1];
+  assert.ok(body, "projects table definition not found");
+  const columns = executable(body)
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith("constraint"))
+    .map((l) => l.split(/\s+/)[0]);
+  assert.deepEqual(columns, ["id", "user_id", "name", "upload_count", "created_at", "updated_at"]);
+});
+
+test("0013: RLS is on and users never set upload_count themselves", () => {
+  const exec = executable(PROJECTS);
+  assert.match(exec, /alter table public\.projects enable row level security/);
+  // A trigger keeps upload_count / user_id when a user updates a row.
+  assert.match(exec, /new\.upload_count\s*:=\s*old\.upload_count/);
+  assert.match(exec, /new\.user_id\s*:=\s*old\.user_id/);
+});
+
+test("0013: increment_project_upload_count checks the caller owns the project and bumps the total too", () => {
+  const exec = executable(PROJECTS);
+  const fn = exec.slice(exec.indexOf("create or replace function public.increment_project_upload_count"));
+  assert.match(fn, /security definer/);
+  assert.match(fn, /set search_path = public/);
+  assert.match(fn, /auth\.uid\(\)/);
+  assert.match(fn, /where id = p_project and user_id = uid/);
+  assert.match(fn, /insert into public\.upload_stats/);
+  assert.match(exec, /grant execute on function public\.increment_project_upload_count\(uuid\) to authenticated/);
+});
+
+test("0013: ownership is checked by row count, not FOUND (a PERFORM in between would reset FOUND)", () => {
+  const exec = executable(PROJECTS);
+  assert.match(exec, /get diagnostics touched = row_count/);
+  assert.match(exec, /if touched = 0 then/);
+});
+
+// ── 0014: projects also count failed uploads - one more integer ─────────────
+
+const FAILED = files.includes("0014_project_failed_count.sql") ? sql("0014_project_failed_count.sql") : "";
+
+test("0014: adds only failed_count, which users can never set", () => {
+  const exec = executable(FAILED);
+  const added = [...exec.matchAll(/add column if not exists (\w+)/g)].map((m) => m[1]);
+  assert.deepEqual(added, ["failed_count"]);
+  assert.match(exec, /upload_count = 0 and failed_count = 0/);
+  // The replaced trigger still keeps both counts and the owner.
+  assert.match(exec, /new\.upload_count\s*:=\s*old\.upload_count/);
+  assert.match(exec, /new\.failed_count\s*:=\s*old\.failed_count/);
+  assert.match(exec, /new\.user_id\s*:=\s*old\.user_id/);
+});
+
+test("0014: record_project_upload_failure moves the caller's own project by 1 only", () => {
+  const exec = executable(FAILED);
+  const fn = exec.slice(exec.indexOf("create or replace function public.record_project_upload_failure"));
+  assert.match(fn, /security definer/);
+  assert.match(fn, /set search_path = public/);
+  assert.match(fn, /if p_delta not in \(1, -1\) then/);
+  assert.match(fn, /where id = p_project and user_id = uid/);
+  assert.match(fn, /get diagnostics touched = row_count/);
+  assert.match(fn, /if touched = 0 then/);
+  assert.match(exec, /grant execute on function public\.record_project_upload_failure\(uuid, int\) to authenticated/);
 });

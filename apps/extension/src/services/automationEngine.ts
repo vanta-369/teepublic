@@ -7,6 +7,7 @@ import type { QueueItem } from "@teepublic/shared";
 import { QueueStore, SettingsStore, BulkLogStore, ImageStore, BulkStateStore } from "./queueStore";
 import { humanDelay } from "../lib/delays";
 import { assertCanAccess, AccessDeniedError } from "../lib/access";
+import { getQuota, getQuotas, projectKey, setLimit, setUsed } from "./uploadQuota";
 
 type EngineState = "idle" | "running" | "paused" | "stopped";
 
@@ -17,6 +18,8 @@ const LOGIN_URL_FRAGMENTS = ["sign_in", "/login", "/users/sign_in", "/auth/", "/
 class AutomationEngine {
   private state: EngineState = "idle";
   private currentTabId: number | null = null;
+  private runStartedAt = 0;
+  private limitHitAt = 0;
 
   getState(): EngineState { return this.state; }
 
@@ -33,7 +36,43 @@ class AutomationEngine {
     // Re-queue selected failed items so the loop will process them again.
     await requeueSelectedFailed();
     this.state = "running";
+    this.runStartedAt = Date.now();
     void this.loop();
+  }
+
+  /** True when TeePublic showed its daily-limit banner during this run (or the
+   *  last 10 min) - failures then are the cap, not the design. */
+  limitHitRecently(): boolean {
+    const at = this.limitHitAt;
+    return at > 0 && (at >= this.runStartedAt || Date.now() - at < 10 * 60_000);
+  }
+
+  /** The content script saw "You have reached your daily limit of N uploads".
+   *  TeePublic is the truth: mark this project's 24h counter full, put
+   *  in-flight designs back to pending, and end the run (loop stops on quota). */
+  async onDailyLimitHit(limit: number) {
+    if (Date.now() - this.limitHitAt < 60_000) return;
+    this.limitHitAt = Date.now();
+    const batch = await QueueStore.get();
+    const key = projectKey(batch?.projectId);
+    const q = await getQuota(key);
+    if (limit > 0 && !(q.limit > 0 && q.limit <= limit)) await setLimit(key, limit);
+    await setUsed(key, Math.max(q.used, q.limit, limit));
+    await BulkStateStore.set(null);
+    for (const it of batch?.items ?? []) {
+      if (it.status === "running") await QueueStore.setItemStatus(it.id, "pending", { lastError: "TeePublic daily limit reached" });
+    }
+    BulkLogStore.append(`TeePublic says the daily limit (${limit || q.limit}) is reached - counter set to full; remaining designs stay pending`);
+  }
+
+  /** Uploads left in the 24h window for this batch's project. At 0 the run
+   *  stops; pending designs stay in the queue for later. */
+  private async quotaLeft(projectId: string | undefined): Promise<number> {
+    const q = (await getQuotas([projectKey(projectId)]))[projectKey(projectId)];
+    if (q.remaining > 0) return q.remaining;
+    this.state = "idle";
+    BulkLogStore.append(`daily limit reached (${q.used}/${q.limit} in 24h) - stopping; remaining designs stay pending`);
+    return 0;
   }
 
   async pause() {
@@ -86,7 +125,9 @@ class AutomationEngine {
           (i.status === "pending" || i.status === "queued") && i.selected !== false
         );
         if (pending.length === 0) { this.state = "idle"; return; }
-        await this.runBulk(pending);
+        const left = await this.quotaLeft(batch.projectId);
+        if (left <= 0) return;
+        await this.runBulk(pending.slice(0, left));
         this.state = "idle";
         return;
       }
@@ -96,6 +137,7 @@ class AutomationEngine {
         (i.status === "pending" || i.status === "queued") && i.selected !== false
       );
       if (!next) { this.state = "idle"; return; }
+      if ((await this.quotaLeft(batch.projectId)) <= 0) return;
 
       const total = batch.items.filter((i) => i.selected !== false).length;
       const remaining = batch.items.filter((i) =>
@@ -308,6 +350,11 @@ class AutomationEngine {
       // Skip a failed design (mark FAILED, don't re-queue) so the run finishes
       // the rest. Keep its stored image so the user can Retry it afterward.
       const message = err instanceof Error ? err.message : String(err);
+      if (this.limitHitRecently()) {
+        await QueueStore.setItemStatus(item.id, "pending", { lastError: "TeePublic daily limit reached", attempts: item.attempts });
+        console.info(`[teepublic] item ${item.id} back to pending - TeePublic daily limit reached`);
+        return;
+      }
       await QueueStore.setItemStatus(item.id, "failed", { lastError: message, attempts: item.attempts + 1 });
       console.info(`[teepublic] item ${item.id} FAILED — skipping, continuing: ${message}`);
     }

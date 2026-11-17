@@ -18,9 +18,14 @@
 // read and swept in the background on start-up, then deleted from chrome.storage.
 
 const DB_NAME = "higgstee-images";
-const DB_VERSION = 1;
+// v2 added the gemini store; onupgradeneeded only creates what is missing.
+const DB_VERSION = 2;
 const STORE_ORIGINALS = "originals";
 const STORE_THUMBS = "thumbs";
+/** Gemini job images: the design sent with a job (in:<jobId>) and the image
+ *  Gemini generated (out:<jobId>). Kept apart from the upload queue's stores so
+ *  clearing one never empties the other. */
+const STORE_GEMINI = "gemini";
 
 /** The chrome.storage key prefixes this replaces — kept for the migration. */
 export const LEGACY_IMG_PREFIX = "teepublic.img.";
@@ -39,6 +44,9 @@ function openDb(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(STORE_THUMBS)) {
         db.createObjectStore(STORE_THUMBS, { keyPath: "id" });
+      }
+      if (!db.objectStoreNames.contains(STORE_GEMINI)) {
+        db.createObjectStore(STORE_GEMINI, { keyPath: "id" });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -139,6 +147,13 @@ export const ThumbsDb = {
 };
 
 /** Several thumbnails in one transaction, for painting a grid. */
+export const GeminiDb = {
+  put: (id: string, dataUrl: string) => put(STORE_GEMINI, id, dataUrl),
+  get: (id: string) => get(STORE_GEMINI, id),
+  delete: (id: string) => del(STORE_GEMINI, id),
+  clear: () => clear(STORE_GEMINI),
+};
+
 export async function getThumbsBatch(ids: string[]): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   if (ids.length === 0) return out;

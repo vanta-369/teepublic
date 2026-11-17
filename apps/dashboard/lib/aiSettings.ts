@@ -40,3 +40,31 @@ export function setGeminiPrompt(prompt: string): void {
   if (trimmed) window.localStorage.setItem(PROMPT, trimmed);
   else        window.localStorage.removeItem(PROMPT);
 }
+
+// Which source "Generate with AI" uses: the API key above, or a Google account
+// connected in the extension (lib/geminiAccount.ts), and which account.
+const SOURCE  = "teepublic.gemini.source";
+const ACCOUNT = "teepublic.gemini.accountIndex";
+
+export type GeminiSource = "account" | "apiKey";
+
+export function getGeminiSource(): GeminiSource {
+  if (typeof window === "undefined") return "account";
+  return window.localStorage.getItem(SOURCE) === "apiKey" ? "apiKey" : "account";
+}
+
+export function setGeminiSource(source: GeminiSource): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(SOURCE, source);
+}
+
+export function getGeminiAccountIndex(): number | null {
+  if (typeof window === "undefined") return null;
+  const n = Number(window.localStorage.getItem(ACCOUNT));
+  return window.localStorage.getItem(ACCOUNT) !== null && Number.isInteger(n) && n >= 0 ? n : null;
+}
+
+export function setGeminiAccountIndex(index: number): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(ACCOUNT, String(index));
+}

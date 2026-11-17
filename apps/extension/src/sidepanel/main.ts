@@ -9,6 +9,10 @@ import { QueueStore, SettingsStore, ThumbStore, getDisplayImages } from "../serv
 import { fetchAccess } from "../lib/access";
 import { supabase, signIn, signOut } from "../lib/supabaseClient";
 import { SUPABASE_CONFIGURED } from "../lib/config";
+import { getChosenProject, listMyProjects, setChosenProject, type ProjectRef } from "../lib/projects";
+import { getQuota, projectKey } from "../services/uploadQuota";
+import type { SalesState } from "../services/salesMonitor";
+import { salesToday } from "../lib/salesCore";
 
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
 const esc = (s: string) =>
@@ -25,6 +29,12 @@ let filterStatus = "all";
 let search = "";
 let page = 0;
 
+// Project step: the designs show only once this profile's project is chosen,
+// and only for a queue sent for that project (or one sent without a project).
+let projects: ProjectRef[] = [];
+let chosenProject: string | null = null;
+let picking = false;
+
 // Grid previews (the small ThumbStore copies, not the print-resolution
 // originals); fetch each once and reuse, so re-renders (e.g. a selection toggle)
 // never re-read storage or reload images.
@@ -38,6 +48,14 @@ async function boot(): Promise<void> {
   await SettingsStore.set({ uploadMode: "single" });
   wireHandlers();
   QueueStore.installCrossPageListener(() => { void renderQueue(); });
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "local" && ("teepublic.sales" in changes || "teepublic.salesSettings" in changes)) void renderSales();
+  });
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "local" && ("teepublic.uploadLog" in changes || "teepublic.dailyLimits" in changes)) void renderSlots();
+  });
+  // "Next slot frees in…" counts down.
+  setInterval(() => void renderSlots(), 60_000);
   // Previews are derived one per design as the dashboard streams the batch in,
   // which is AFTER the queue itself is stored. Fill each tile the moment its
   // preview lands, instead of leaving the grid blank until the next re-render.
@@ -53,6 +71,7 @@ async function boot(): Promise<void> {
   chrome.runtime.onMessage.addListener((m) => {
     if (m?.type === "ACCESS_LOCKED") void refresh();
   });
+  void renderSales();
   await refresh();
 }
 
@@ -70,6 +89,7 @@ async function refresh(): Promise<void> {
   if (!user) { setView("login"); return; }
   setView("app");
   await renderAccess();
+  await loadProjects();
   await renderQueue();
 }
 
@@ -139,9 +159,151 @@ async function sessionEmail(): Promise<string | null> {
   } catch { return null; }
 }
 
+// ── Project step ─────────────────────────────────────────────────────────────
+async function loadProjects(): Promise<void> {
+  ($("project-error") as HTMLElement).textContent = "";
+  try { projects = await listMyProjects(); }
+  catch (e) {
+    projects = [];
+    ($("project-error") as HTMLElement).textContent = `Couldn't load projects: ${(e as Error).message}`;
+  }
+  const stored = await getChosenProject();
+  chosenProject = projects.some((p) => p.id === stored) ? stored : null;
+}
+
+const projectName = (id: string | null | undefined) => projects.find((p) => p.id === id)?.name ?? "another project";
+
+/** True when the designs may be shown: a project is chosen and the queue is
+ *  for it. Shows the gate / the mismatch note otherwise. */
+function renderProject(): boolean {
+  const gate = !chosenProject || picking;
+  ($("project-gate") as HTMLElement).hidden = !gate;
+  ($("project-bar") as HTMLElement).hidden = gate;
+  if (gate) {
+    const list = $("project-list");
+    list.innerHTML = projects.length
+      ? projects.map((p) => `<button class="project-pick" data-id="${esc(p.id)}">${esc(p.name)}<span>›</span></button>`).join("")
+      : `<p class="muted small">No projects yet. Make one on the dashboard (Create Product → + New project), then press Refresh.</p>
+         <button id="project-open-dash" class="btn btn-secondary btn-block">Open dashboard</button>`;
+    list.querySelectorAll<HTMLElement>(".project-pick").forEach((b) => {
+      b.addEventListener("click", () => void chooseProject(b.dataset.id!));
+    });
+    document.getElementById("project-open-dash")?.addEventListener("click", async () => {
+      chrome.tabs.create({ url: `${await dashboardOrigin()}/dashboard/create` });
+    });
+  } else {
+    $("project-name").textContent = projectName(chosenProject);
+  }
+  if (!gate) void renderSlots();
+  if (!gate) void renderSales();
+  const mismatch = !gate && !!batch?.projectId && batch.projectId !== chosenProject;
+  ($("project-mismatch") as HTMLElement).hidden = !mismatch;
+  if (mismatch) {
+    $("project-mismatch-text").textContent =
+      `This queue was sent for "${projectName(batch!.projectId)}", not "${projectName(chosenProject)}". Upload it from the Chrome profile signed in to that TeePublic account - or switch this profile's project.`;
+    $("project-switch").textContent = `Switch to ${projectName(batch!.projectId)}`;
+  }
+  const show = !gate && !mismatch;
+  ($("queue-area") as HTMLElement).hidden = !show;
+  for (const id of ["act-start", "act-pause", "act-clear"]) {
+    (document.getElementById(id) as HTMLButtonElement).disabled = locked || !show;
+  }
+  return show;
+}
+
+/** "N free slots" for the chosen project: TeePublic's rolling 24h limit,
+ *  counted by the extension (services/uploadQuota.ts). */
+async function renderSlots(): Promise<void> {
+  if (!chosenProject) return;
+  const q = await getQuota(projectKey(chosenProject));
+  const box = $("slots");
+  box.dataset.full = q.remaining <= 0 ? "1" : "";
+  $("slots-free").textContent = q.remaining <= 0
+    ? "No free slots"
+    : `${q.remaining} free slot${q.remaining === 1 ? "" : "s"}`;
+  $("slots-used").textContent = `${q.used} / ${q.limit} used · 24h`;
+  ($("slots-fill") as HTMLElement).style.width = `${q.limit > 0 ? Math.min(100, (q.used / q.limit) * 100) : 100}%`;
+  $("slots-next").textContent = q.nextFreeAt ? `Next slot frees ${fmtWait(q.nextFreeAt - Date.now())}` : "";
+}
+
+function fmtWait(ms: number): string {
+  if (ms <= 0) return "now";
+  const m = Math.ceil(ms / 60_000);
+  if (m < 60) return `in ${m} min`;
+  return `in ${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+// ── Sales (TeePublic sales notifier) ─────────────────────────────────────────
+// The sales icon (header, and the sign-in screen - sales need no Higgstee
+// account) opens the Sales window (src/sales) and carries today's sales.
+async function renderSales(): Promise<void> {
+  const res = (await sendMsg({ type: "SALES_STATE" })) as { data?: SalesState } | undefined;
+  const today = salesToday(res?.data?.daily);
+  const on = res?.data?.enabled !== false;
+  document.querySelectorAll<HTMLElement>(".sales-count").forEach((count) => {
+    count.dataset.zero = on && today > 0 ? "" : "1";
+    count.textContent = on ? String(today) : "off";
+  });
+}
+
+/** The sales icon opens the Sales screen as the extension's own toolbar popup -
+ *  the dropdown Chrome shows under any extension's icon. The toolbar button is
+ *  pointed at the Sales screen just long enough to open it, then back to "open
+ *  the side panel", so clicking the Higgstee icon still opens the uploader.
+ *  Where Chrome can't open a popup this way, the in-panel dropdown is used. */
+let salesOpening = false;
+async function openSalesPopup(): Promise<void> {
+  // Chrome without openPopup (before 127): the in-panel dropdown, or a tab on
+  // the sign-in screen (the dropdown lives in the signed-in view).
+  if (typeof chrome.action.openPopup !== "function") {
+    if (document.body.dataset.view === "app") toggleSalesPop(true);
+    else void chrome.tabs.create({ url: chrome.runtime.getURL("sales/index.html") });
+    return;
+  }
+  // A second click while it opens (a double-click) does nothing.
+  if (salesOpening) return;
+  salesOpening = true;
+  try {
+    await chrome.action.setPopup({ popup: "sales/index.html" });
+    await chrome.action.openPopup();
+  } catch (e) {
+    // Usually "a popup is already open" - it is, so there is nothing to add.
+    console.info("[higgstee] sales popup not opened:", (e as Error).message);
+  } finally {
+    // Once open, the popup stays; the toolbar button goes back to the side panel.
+    setTimeout(() => { void chrome.action.setPopup({ popup: "" }); salesOpening = false; }, 400);
+  }
+}
+
+/** Fallback: the Sales screen floating under the sales icon, inside the panel.
+ *  Click outside it or press Esc to close. */
+function toggleSalesPop(open?: boolean): void {
+  const pop = $("sales-pop") as HTMLElement;
+  const btn = $("sales-toggle");
+  const next = open ?? pop.hidden;
+  if (next) {
+    const r = btn.getBoundingClientRect();
+    pop.style.setProperty("--pop-top", `${Math.round(r.bottom + 10)}px`);
+    pop.style.setProperty("--pop-arrow", `${Math.max(14, Math.round(window.innerWidth - r.right + r.width / 2 - 17))}px`);
+    const frame = $("sales-frame") as HTMLIFrameElement;
+    // Loaded each time it opens: fresh numbers, and opening marks sales as seen.
+    frame.src = chrome.runtime.getURL("sales/index.html");
+  }
+  pop.hidden = !next;
+  btn.setAttribute("aria-expanded", String(next));
+}
+
+async function chooseProject(id: string): Promise<void> {
+  chosenProject = id;
+  picking = false;
+  await setChosenProject(id);
+  await renderQueue();
+}
+
 // ── Queue rendering ──────────────────────────────────────────────────────────
 async function renderQueue(): Promise<void> {
   batch = await QueueStore.get();
+  if (!renderProject()) return;
   renderStats();
   renderGrid();
 }
@@ -320,6 +482,10 @@ async function invertPage(): Promise<void> {
 // ── Actions ──────────────────────────────────────────────────────────────────
 async function start(): Promise<void> {
   if (locked) return;
+  if (!chosenProject || (batch?.projectId && batch.projectId !== chosenProject)) {
+    alert("Choose this profile's project first (top of the panel).");
+    return;
+  }
   // Selected "failed" items count as eligible: pressing Start re-queues them for
   // retry (the engine calls requeueSelectedFailed() before the run begins).
   const eligible = (batch?.items ?? []).filter(
@@ -409,6 +575,16 @@ function wireHandlers(): void {
       await sendMsg({ type: "QUEUE_CLEAR" });
     }
   });
+
+  // Sales
+  $("sales-toggle").addEventListener("click", () => void openSalesPopup());
+  $("login-sales").addEventListener("click", () => void openSalesPopup());
+  $("sales-pop").addEventListener("click", (e) => { if ((e.target as HTMLElement).dataset.close) toggleSalesPop(false); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !($("sales-pop") as HTMLElement).hidden) toggleSalesPop(false); });
+
+  // Project
+  $("project-change").addEventListener("click", () => { picking = true; void renderQueue(); });
+  $("project-switch").addEventListener("click", () => { if (batch?.projectId) void chooseProject(batch.projectId); });
 
   // Lock overlay
   $("lock-trial").addEventListener("click", async () => chrome.tabs.create({ url: await dashboardOrigin() }));

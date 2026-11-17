@@ -166,7 +166,11 @@ export function UploadStagePanel() {
   function sendToExtension() {
     return run("send", async () => {
       if (!isExtensionAvailable() || !getExtensionId()) {
-        throw new Error("Extension isn't connected — connect it on the Extension page first.");
+        throw new Error(
+          /^(localhost|127\.0\.0\.1)$/.test(window.location.hostname)
+            ? "The Chrome Web Store extension only connects to https://www.higgstee.com - open the dashboard there."
+            : "Chrome can't see the Higgstee extension on this page. Install it from the Chrome Web Store, make sure it's enabled, then reload this page.",
+        );
       }
       if (selected.length === 0) throw new Error("Select at least one design to send.");
       if (untitled > 0) throw new Error(`${untitled} selected design(s) have no title — set one first.`);

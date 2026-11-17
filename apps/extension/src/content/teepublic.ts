@@ -18,6 +18,8 @@ import {
   findRadioByLabel,
 } from "../lib/dom";
 import { humanDelay, sleep } from "../lib/delays";
+import "./storeDelete"; // bulk delete on the owner's store page
+import "./listingExport"; // floating icon: export every listing on a store/search page
 import { configureProductTable, configureOtherProducts, configureNonApparelColors, applyEnabledProducts, applyProductColorPalette, findBlockingEmptyColors, fullClick } from "./colors";
 
 console.info("[teepublic-cs] ready on", location.href);
@@ -1454,4 +1456,30 @@ function clickableAncestor(el: HTMLElement): HTMLElement {
 function log(msg: string) {
   console.info("[teepublic-cs]", msg);
   BulkLogStore.append(msg);
+}
+
+// TeePublic never shows how many uploads are left - only a red flash banner
+// once the cap is hit ("You have reached your daily limit of 50 uploads…").
+// Watch every page for it and tell the background, which fills this project's
+// 24h counter and stops the run (designs stay pending instead of failing).
+let dailyLimitReported = false;
+let dailyLimitCheckTimer: ReturnType<typeof setTimeout> | null = null;
+function checkDailyLimitBanner() {
+  dailyLimitCheckTimer = null;
+  if (dailyLimitReported || !document.body) return;
+  const m = /reached your daily limit of\s+(\d+)\s+uploads?/i.exec(document.body.textContent ?? "");
+  if (!m) return;
+  dailyLimitReported = true;
+  log(`TeePublic daily limit banner detected (${m[1]} uploads/24h) - stopping the run`);
+  try {
+    chrome.runtime.sendMessage({ type: "TEEPUBLIC_LIMIT_HIT", limit: parseInt(m[1], 10) }, () => void chrome.runtime.lastError);
+  } catch (e) {
+    console.warn("[teepublic-cs] TEEPUBLIC_LIMIT_HIT send failed:", e);
+  }
+}
+checkDailyLimitBanner();
+if (document.body) {
+  new MutationObserver(() => {
+    if (!dailyLimitReported && dailyLimitCheckTimer == null) dailyLimitCheckTimer = setTimeout(checkDailyLimitBanner, 1000);
+  }).observe(document.body, { childList: true, subtree: true });
 }

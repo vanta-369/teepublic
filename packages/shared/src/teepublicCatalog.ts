@@ -51,55 +51,46 @@ const list = (...labels: string[]): TPColor[] => labels.map(tag);
 // list per product may shift over time; the matcher tolerates that with
 // substring + family fallbacks.
 export const TEEPUBLIC_CATALOG: Record<string, TPColor[]> = {
+  // Each list below is exactly TeePublic's "Select Default Color" dropdown for
+  // that product, in its order (checked against the live page, 2026-11-04).
   "T-Shirt": list(
-    "White", "Black", "Asphalt", "Charcoal", "Heather", "Athletic Heather", "Oatmeal Heather", "Natural Heather", "Vintage White", "Vintage Black",
-    "Navy", "Vintage Navy", "Royal Blue", "True Royal", "Light Blue", "Baby Blue", "Powder Blue", "Cobalt", "Teal",
-    "Red", "Vintage Red", "Maroon", "Burgundy",
-    "Kelly", "Forest Green", "Military Green", "Sage", "Olive",
-    "Pink", "Soft Pink", "Hot Pink", "Lavender",
-    "Purple", "Orange", "Yellow", "Brown", "Tan",
-    "Black/White", "White/Black",
+    "White", "Heather", "Black", "Navy", "Light Blue", "Royal Blue", "Kelly", "Teal", "Maroon", "Red",
+    "Soft Pink", "Hot Pink", "Brown", "Yellow", "Creme", "Latte", "Purple", "Asphalt", "Tie Dye",
   ),
   "Hoodie": list(
-    "Black", "Asphalt", "Charcoal Heather", "Heather", "Vintage Heather", "Athletic Heather", "Oatmeal Heather", "Natural Heather",
-    "Navy", "Royal", "Vintage Royal", "Slate",
-    "Maroon", "Red", "Forest", "Olive", "Sage", "Sport Green",
-    "Pink", "Lavender", "Purple", "Brown",
+    "Oatmeal Heather", "Black", "Charcoal Heather", "Navy", "Burgundy", "Creme", "Vintage Heather",
   ),
   "Tank": list(
-    "White", "Black", "Heather", "Vintage Black", "Vintage White",
-    "Navy", "Royal", "Red", "Maroon", "Forest", "Pink", "Purple",
+    "White", "Black", "Navy", "Red",
   ),
   "Crewneck": list(
-    "White", "Black", "Vintage Heather", "Athletic Heather", "Oatmeal Heather",
-    "Navy", "Royal", "Maroon", "Red", "Forest", "Sage",
+    "White", "Heather", "Black", "Charcoal Heather", "Navy", "Royal Blue", "Creme",
   ),
   "Long Sleeve T-Shirt": list(
-    "White", "Black", "Asphalt", "Heather", "Vintage Heather", "Oatmeal Heather",
-    "Navy", "Royal", "Red", "Maroon", "Forest",
+    "White", "Heather", "Black", "Navy", "Ghost", "Royal Blue", "Dark Green",
   ),
   "Baseball Tee": list(
-    "Black/White", "White/Black", "White/Red", "White/Navy", "White/Kelly", "White/Royal", "Heather/Black", "Heather/Navy",
+    "Black/White", "White/Black", "White/Royal", "White/Red", "White/Kelly", "White/Navy",
   ),
   "Kids": list(
-    "White", "Black", "Heather", "Athletic Heather", "Natural Heather",
-    "Navy", "Royal", "Red", "Maroon", "Pink", "Light Pink", "Hot Pink",
-    "Kelly", "Sport Green", "Yellow", "Purple",
+    "White", "Heather", "Dark Grey", "Black", "Navy", "Light Blue", "Coastal Blue", "Royal Blue", "Slate",
+    "Forest Green", "Moss", "Basil", "Red", "Soft Pink", "Orange", "Butter", "Blush", "Creme", "Lavender",
+    "Asphalt", "Sunset Stripe",
   ),
   "Kids Hoodie": list(
-    "Black", "Vintage Heather", "Natural Heather", "Athletic Heather",
-    "Navy", "Royal", "Vintage Royal", "Red", "Maroon", "Pink",
+    "Natural Heather", "Black", "Navy", "Kelly", "Mauvelous", "Red Heather", "Vintage Royal",
   ),
   "Kids Long Sleeve T-Shirt": list(
-    "Black", "Navy", "Royal", "Deep Royal", "Red", "Pink", "Hot Pink", "Sport Green",
+    "Black", "Navy", "Deep Royal",
   ),
   // Exactly TeePublic's trucker-hat dropdown — no other colors are offered.
   "Hats": list(
     "Black", "Navy", "Deep Royal", "Red", "Creme",
     "White/Black", "White/Royal", "White/Red", "White/Navy",
   ),
+  // Exactly TeePublic's shorts dropdown — no other colors are offered.
   "Shorts": list(
-    "Black", "Heather", "Charcoal", "Navy", "Olive", "Military Green",
+    "Heather", "Black", "Military Green", "Creme",
   ),
   "Bags": list(
     "Light Grey", "Natural", "Black", "Oxford", "Navy",

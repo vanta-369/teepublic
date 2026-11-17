@@ -7,6 +7,7 @@
 // "All"    → "" — let the user pick per product. We still pre-fill the dropdown
 //           with the first option so the queue ships valid values.
 
+import { colorDistance, labelRgb } from "./colorHex";
 import { TEEPUBLIC_CATALOG, SLUG_TO_PRODUCT_LABEL, FAMILY_MEMBERS, resolveColor, type TPColor, type ColorFamily } from "@teepublic/shared";
 
 export type ColorPreset = "light" | "dark" | "all";
@@ -23,15 +24,28 @@ export interface BasicColor {
   checkOn: "light" | "dark";
 }
 
+// TeePublic's own "Select Default Color" list, in its order. `hex` may be any
+// CSS background (Tie Dye is a gradient).
 export const BASIC_COLORS: BasicColor[] = [
-  { name: "Black",       hex: "#0a0a0a", checkOn: "light" },
-  { name: "White",       hex: "#ffffff", checkOn: "dark"  },
-  { name: "Red",         hex: "#dc2626", checkOn: "light" },
-  { name: "Royal Blue",  hex: "#2563eb", checkOn: "light" },
-  { name: "Kelly Green", hex: "#16a34a", checkOn: "light" },
-  { name: "Yellow",      hex: "#facc15", checkOn: "dark"  },
-  { name: "Pink",        hex: "#ec4899", checkOn: "light" },
-  { name: "Purple",      hex: "#9333ea", checkOn: "light" },
+  { name: "White",      hex: "#ffffff", checkOn: "dark"  },
+  { name: "Heather",    hex: "#b9b9b9", checkOn: "dark"  },
+  { name: "Black",      hex: "#141414", checkOn: "light" },
+  { name: "Navy",       hex: "#232a3b", checkOn: "light" },
+  { name: "Light Blue", hex: "#c5e0ec", checkOn: "dark"  },
+  { name: "Royal Blue", hex: "#2f5291", checkOn: "light" },
+  { name: "Kelly",      hex: "#0b7a45", checkOn: "light" },
+  { name: "Teal",       hex: "#0f9bc4", checkOn: "light" },
+  { name: "Maroon",     hex: "#6b2a35", checkOn: "light" },
+  { name: "Red",        hex: "#d12a2a", checkOn: "light" },
+  { name: "Soft Pink",  hex: "#fbc3cf", checkOn: "dark"  },
+  { name: "Hot Pink",   hex: "#d4457f", checkOn: "light" },
+  { name: "Brown",      hex: "#3f2f27", checkOn: "light" },
+  { name: "Yellow",     hex: "#fbb72a", checkOn: "dark"  },
+  { name: "Creme",      hex: "#ede3cc", checkOn: "dark"  },
+  { name: "Latte",      hex: "#dcc5a4", checkOn: "dark"  },
+  { name: "Purple",     hex: "#59306f", checkOn: "light" },
+  { name: "Asphalt",    hex: "#4d5258", checkOn: "light" },
+  { name: "Tie Dye",    hex: "conic-gradient(#f9a8d4, #fde68a, #a7f3d0, #93c5fd, #c4b5fd, #f9a8d4)", checkOn: "dark" },
 ];
 
 // Inverse of SLUG_TO_PRODUCT_LABEL — handy in the UI.
@@ -79,7 +93,7 @@ export function applyBasicColor(requested: string): Record<string, string> {
   for (const [slug, label] of Object.entries(SLUG_TO_PRODUCT_LABEL)) {
     const palette = paletteFor(label);
     if (palette.length === 0) continue;
-    out[slug] = pickSolidPreferred(requested, palette);
+    out[slug] = pickSolidPreferred(requested, palette, label);
   }
   return out;
 }
@@ -99,13 +113,14 @@ export function resolvePerProductColors(
     if (!label) { out[slug] = value; continue; }
     const palette = paletteFor(label);
     if (palette.length === 0) { out[slug] = value; continue; }
-    out[slug] = pickSolidPreferred(value, palette);
+    out[slug] = pickSolidPreferred(value, palette, label);
   }
   return out;
 }
 
-/** Pick the best label, preferring solids over combos. */
-function pickSolidPreferred(requested: string, palette: TPColor[]): string {
+/** Pick the best label, preferring solids over combos. Always one of the
+ *  product's own colours - TeePublic offers nothing else. */
+function pickSolidPreferred(requested: string, palette: TPColor[], productLabel: string): string {
   const r = requested.toLowerCase().trim();
   const solids = palette.filter((c) => !c.label.includes("/"));
   const combos = palette.filter((c) =>  c.label.includes("/"));
@@ -137,8 +152,22 @@ function pickSolidPreferred(requested: string, palette: TPColor[]): string {
   const startsCombo = combos.find((c) => c.label.toLowerCase().startsWith(r));
   if (startsCombo) return startsCombo.label;
 
-  // 6. Last resort — shared resolver (covers family combos, fallback).
-  return resolveColor(requested, palette[0] ? palette[0].label : "T-Shirt").chosen.label || palette[0].label;
+  // 5b. The nearest shade this product sells (solids first; a combos-only
+  // product like Baseball Tee by its sleeve colour). Purple on a Hoodie with
+  // no purple lands on its darkest close colour, not on its first one.
+  const want = labelRgb(requested);
+  if (want) {
+    const pool = (solids.length ? solids : combos)
+      .map((c) => ({ c, rgb: labelRgb(c.label) }))
+      .filter((x): x is { c: TPColor; rgb: [number, number, number] } => x.rgb !== null);
+    pool.sort((a, b) => colorDistance(want, a.rgb) - colorDistance(want, b.rgb));
+    if (pool[0]) return pool[0].c.label;
+  }
+
+  // 6. Last resort — shared resolver (covers family combos, fallback), kept to
+  // this product's palette.
+  const chosen = resolveColor(requested, productLabel).chosen.label;
+  return palette.some((c) => c.label === chosen) ? chosen : palette[0].label;
 }
 
 /** Merge a custom color list (user-added per product) into the static catalog.

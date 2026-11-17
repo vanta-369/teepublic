@@ -57,7 +57,7 @@ build-time `define`s all resolve exactly as they do in a build.
 
 ### Loading / rebuilding the extension
 
-`build.mjs` bakes the Supabase URL + anon key into the bundle at build time via esbuild `define`. Set `SUPABASE_URL` / `SUPABASE_ANON_KEY` (or reuse the dashboard's `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY`) **before** building, or auth/access gating is compiled out with a warning. After building, load `apps/extension/dist` as an unpacked extension at `chrome://extensions`, then paste its ID into the dashboard's Extension Status panel.
+`build.mjs` bakes the Supabase URL + anon key into the bundle at build time via esbuild `define`. Set `SUPABASE_URL` / `SUPABASE_ANON_KEY` (or reuse the dashboard's `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY`) **before** building, or auth/access gating is compiled out with a warning. After building, load `apps/extension/dist` as an unpacked extension at `chrome://extensions`. The dashboard connects **only** to the published Web Store extension (`EXTENSION_ID` = `obkkmfkhfofjemedkdmemdadbcodjdpn` and `EXTENSION_STORE_URL` in `lib/nav.ts`); the manual-ID "Advanced" panel was removed at the owner's request (2026-11-17), so an unpacked build (different ID) won't connect to the dashboard.
 
 ### Dashboard env
 
@@ -79,6 +79,10 @@ The sender also takes a `resolveImage` callback. Artwork is NOT carried on the q
   - **bulk** — dispatches all selected designs to `bulk_uploader`; the content script then *self-drives* across the many `/designs/<id>/edit` pages it loads, surviving each navigation via `chrome.storage` run-state; the engine just monitors until every item reports a terminal status.
 - **`content/teepublic.ts`** — a **thin DOM driver** injected into `*.teepublic.com`. Fills forms and clicks Publish. Because a successful Publish navigates the page and destroys the `sendResponse` callback, terminal status flows back over resilient fire-and-forget messages instead: `ITEM_STATUS` and `PUBLISHED_URL_DETECTED` (the freshly-loaded content script on a `/t-shirt/<slug>` listing announces success). The engine also polls tab URL + stored status as a fallback before ever downgrading an item to failed — this is what prevents re-publishing the same design.
 
+- **`content/storeDelete.ts`** — bulk delete on the owner's store page (imported by `teepublic.ts`, inert on `/designs*`). Checkbox overlays + one floating bar; deletes one design at a time through TeePublic's own card menu → Delete → confirm (a native `confirm()` is answered via the SW's `TP_AUTO_CONFIRM`, MAIN-world `executeScript`). Run state (design ids only) lives in `chrome.storage.local` `teepublic.storeDelete` and resumes across page loads; `ASSERT_ACCESS` every iteration. Selectors in `STORE` — unverified against the live page when written.
+
+- **`content/listingExport.ts`** — floating lime icon on any page with design cards (store, search; never `/designs*`). Opens a panel that GETs each card's public `/t-shirt/<id>` page (same origin, 3 at a time), parses title / main tag / supporting tags / description (`lib/listingCore.ts`, selectors in `LISTING`, pinned by `tests/listing-export.test.ts`), and offers copy buttons + an `.xlsx` download (hand-written workbook zipped with `fflate`). Nothing is stored or sent off the tab. The earnings tables (`components/dashboard.tsx`) get a picture per design id the same way: `DESIGN_IMAGES` → `services/designImages.ts` reads `og:image` from the public design page (cached in `teepublic.designImages`), and `withRemoteImages` (`lib/designThumbs.ts`) uses it when the local library has no title match. `storeDelete.ts` also paints each card's upload date ABOVE the picture, read from the `/designs/<id>_<n>/<unix>/` stamp in the image URL. (A trending-tag badge / "⛏ Scrape" feature and a merge of the owner's "TP-Design Scraper" extension were built and then removed at the owner's request, 2026-11-16 - don't reintroduce them unasked; the Scraper is kept as its own extension under `Teepublic Scraper/`.)
+
 **Status invariants worth respecting when editing:** succeeded items are never downgraded; `succeeded` items get their stored image freed, `failed` items keep it (so Retry has the artwork); pressing Start re-queues *selected* `failed` items.
 
 ### Selectors are centralized — fix them in ONE place
@@ -98,7 +102,7 @@ Sensitive `profiles` columns (`plan`, `trial_*`, `account_status`, `approved`) h
 ### Dashboard two-mode flow
 
 `components/UploaderApp.tsx` toggles between `spreadsheet` and `generate` modes:
-- **spreadsheet** — `lib/parser.ts` reads `.xlsx`/`.csv`, images are matched to rows by filename **stem** (lowercased, extension-stripped, so `1` matches `1.png`), `lib/validator.ts` validates, `lib/queue.ts` (`buildQueue`) assembles the `QueueBatch`.
+- **spreadsheet** ("From spreadsheet") — images, optionally with a listings `.xlsx`/`.csv` dropped alongside (or later via "Upload listings file"): `applySheetRows` (`lib/listingSheet.ts`) fills matching designs by filename stem, so the table step is skipped when nothing is missing. Each image gets a row in an Excel-like grid (`components/ListingSheet.tsx`; data ops in `lib/listingSheet.ts`, pinned by `tests/listing-sheet.test.ts`) with the old template's metadata columns. It opens in a full-screen `ListingsView` after an upload and stays until closed; ranges, row/column selection, Excel-format copy/paste, Delete, Ctrl+D, undo by filename. Deleting a row removes that design from the batch. It yields the same `ParsedRow[]` the parser did (`metadataFromRow`), matched by filename **stem** (`1` matches `1.png`); `lib/validator.ts` validates, `lib/queue.ts` (`buildQueue`) assembles the `QueueBatch`. Colors / enabled products are set per design in the design card (the template's Sheet2/Sheet3 are not read). `lib/parser.ts` is no longer used by this page. The page shows one step at a time, derived by `createPhase(images, issues)`: `upload` (hero `Dropzone variant="hero"` only) → `listings` (one quiet row; table open) → `configure` (every design as a `DesignCard` in a grid + Send; a card's arrow opens its listing and it spans the row, one at a time). Nothing stores the step, so a reload lands on the same one. Styles are the `.cp-*` classes in `globals.css`; `.cp-soft` removes outlines on this page.
 - **generate** — `components/GenerationApp.tsx` + `lib/gemini.ts` call Gemini directly from the browser with the user's own API key (never proxied server-side) and a `responseSchema` that maps to `DesignMetadata`.
 
 Designs and spreadsheet batches persist **locally, in the browser's IndexedDB** — `lib/localDb.ts` is the store, `lib/designsStore.ts` and `lib/spreadsheetStore.ts` are the two façades over it. There are no `/api/designs` or `/api/spreadsheet` routes any more, and nothing follows the account across browsers. Moving work between machines is the export/import batch file on the Uploads page.
@@ -125,7 +129,20 @@ that breaking it is loud rather than silent:
    `upload_stats (user_id, total_upload_count, updated_at)`.
 
 What Supabase may hold, and nothing more: user id, email, approval/trial/plan/
-subscription/account status, admin flag, and that one upload count.
+subscription/account status, admin flag, that one upload count, and **projects**
+(migration `0013`: per project only a name and an upload count; `0014` adds a
+failed count, moved only by `record_project_upload_failure(p_project, p_delta)`
+from `uploadCounter.ts` - each item counted once, taken back if a retry publishes).
+
+**Projects** = one per TeePublic account (each account lives in its own Chrome
+profile, where its designs are prepared and uploaded). Create Product requires
+choosing one before designs can be dropped (`components/ProjectPicker.tsx`; the
+choice is per profile, IndexedDB `docs` key `chosenProject`); the batch carries
+`projectId`, and the extension then calls `increment_project_upload_count(p_project)`
+(bumps the project AND the total) instead of `increment_upload_count()`. Table
+access lives only in `lib/projects.ts`, the RPC only in `uploadCounter.ts` -
+pinned by `tests/no-server-storage.test.ts`. Dashboard home lists each project's
+count (`ProjectsPanel`). Daily per-project limits are the planned next step.
 
 **When an upload succeeds**, the extension calls the no-argument RPC
 `increment_upload_count()`; the server resolves the account from `auth.uid()`.
@@ -146,6 +163,47 @@ is inert** — every destructive statement is commented out and must stay that w
 until the owner has reviewed the inspection output and approved the deletion.
 Flipping the public `designs` bucket private is documented in `0010` step 6 and
 is likewise not executed.
+
+### Gemini browser jobs (gemini.google.com via the extension)
+
+A second Gemini path, separate from `lib/gemini.ts` (official API + user key):
+the extension drives gemini.google.com in background tabs, in Google accounts the
+user signed into in their own Chrome. Contract in `packages/shared/src/gemini.ts`;
+messages `LIST_ACCOUNTS`/`ADD_ACCOUNT`/`RUN_GEMINI_JOB`/`GEMINI_STATE`/`GEMINI_RESULT`
+in `protocol.ts`.
+
+- `services/geminiJobs.ts` — job list (`teepublic.gemini.jobs`), accounts
+  (`teepublic.gemini.accounts`), runner. One job at a time **per account**; a job
+  runs on exactly its `accountIndex` — never add account picking/rotation. Images
+  live in IndexedDB's `gemini` store (`imageDb.ts` v2), not chrome.storage.
+- `services/geminiDebugger.ts` — attaches the design the way Donepixel/Playwright
+  does: chrome.debugger trusted clicks + `Page.setInterceptFileChooserDialog`, then
+  fills the exact input Gemini opened. Attached for seconds, only to job tabs
+  (`isJobTab`). Requested by the content script via `GEMINI_ATTACH_DEBUGGER`; the
+  synthetic paths below are the fallback.
+- `content/geminiMain.ts` — the only page-world ("world": "MAIN") script: answers
+  Gemini's `input.click()` on its file input with an armed File instead of the OS
+  picker (which needs a real user gesture). Jobs run in ONE shared minimized window.
+- `content/gemini.ts` — thin DOM driver; reports via fire-and-forget
+  `GEMINI_JOB_DONE` (like `ITEM_STATUS`), because jobs outlive the SW idle timeout.
+- `lib/geminiSelectors.ts` — every Gemini selector. Unverified against the live
+  page when written; fix breakage here.
+- Dashboard: `/dashboard/gemini` is the "Connect account" page (`GeminiAccountsPanel`);
+  listing generation runs from Create Product → Generate with AI → "Google account"
+  (`lib/geminiAccount.ts`: queues one job, polls, removes it). `GeminiGeneratePanel` /
+  `GeminiJobsPanel` (image jobs) are currently not routed.
+  Jobs are kept apart from the TeePublic `QueueBatch` on purpose — the upload
+  engine would try to publish anything pending in it.
+
+### TeePublic sales notifier (extension, local only)
+
+`services/salesMonitor.ts` (worker) + `src/offscreen/` (offscreen document: DOMParser + audio) +
+`lib/salesCore.ts` (parse/compare, pinned by `tests/sales-notifier.test.ts`). The offscreen page
+GETs `www.teepublic.com/account/sales` with the user's session every N s (default 120, minimum 60 - fewer requests to TeePublic; a switch turns it off, badge "off"), the worker
+compares with the last reading: items-sold rise -> notification + `sale.mp3` + badge; royalty-only
+changes / corrections are logged silently; the first reading is a baseline. State is in
+`chrome.storage.local` (`teepublic.sales`, keyed by the side panel's chosen project so two accounts
+are never compared; `teepublic.salesSettings`). Nothing reaches Supabase. UI: the side panel's Sales box.
 
 ### Shared package has no build step
 

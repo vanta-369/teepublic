@@ -15,7 +15,8 @@ import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { parseSalesFile } from "@/lib/csv-parser";
 import { RANGE_OPTIONS, buildDashboardData, buildPeriodSummary } from "@/lib/dashboard-data";
-import { loadDesignThumbs, EMPTY_THUMB_INDEX, type DesignThumbIndex } from "@/lib/designThumbs";
+import { loadDesignThumbs, withRemoteImages, EMPTY_THUMB_INDEX, type DesignThumbIndex } from "@/lib/designThumbs";
+import { fetchDesignImages } from "@/lib/bridge";
 import {
   clearSalesReport,
   fileToCsvText,
@@ -49,7 +50,7 @@ export function Dashboard() {
   const [range, setRange] = React.useState<RangeKey>("30d");
   const [productType, setProductType] = React.useState<string | null>(null);
   const [dragging, setDragging] = React.useState(false);
-  const [thumbs, setThumbs] = React.useState<DesignThumbIndex>(EMPTY_THUMB_INDEX);
+  const [localThumbs, setThumbs] = React.useState<DesignThumbIndex>(EMPTY_THUMB_INDEX);
   // When the saved report was stored, for the "saved" line.
   const [savedAt, setSavedAt] = React.useState<string | null>(null);
   // False when only the browser copy exists (migration 0008 not applied yet).
@@ -74,6 +75,37 @@ export function Dashboard() {
       loaded?.revoke();
     };
   }, []);
+
+  // Every other design gets TeePublic's own picture, by design id, through the
+  // extension (it reads the public design page; cached there). Best-earning
+  // designs first, a slice per request, until nothing new comes back. No
+  // extension / not signed in: the tables simply keep their placeholders.
+  const [remoteImages, setRemoteImages] = React.useState<Record<string, string>>({});
+  React.useEffect(() => {
+    if (!result) return;
+    let cancelled = false;
+    const earned = new Map<string, number>();
+    for (const r of result.rows) {
+      if (r.designId && !localThumbs.get(r.designId, r.design)) earned.set(r.designId, (earned.get(r.designId) ?? 0) + r.earnings);
+    }
+    const ids = [...earned.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id);
+    if (ids.length === 0) return;
+    void (async () => {
+      const got: Record<string, string> = {};
+      for (let round = 0; round < 40 && !cancelled; round++) {
+        const missing = ids.filter((id) => !(id in got));
+        if (missing.length === 0) break;
+        let answer: Record<string, string>;
+        try { answer = await fetchDesignImages(missing); } catch { break; }
+        const fresh = Object.keys(answer).filter((id) => !(id in got));
+        if (fresh.length === 0) break;
+        Object.assign(got, answer);
+        if (!cancelled) setRemoteImages({ ...got });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [result, localThumbs]);
+  const thumbs = React.useMemo(() => withRemoteImages(localThumbs, remoteImages), [localThumbs, remoteImages]);
 
   /**
    * Parse a file and show it.
@@ -366,7 +398,16 @@ function EmptyState({
 
   return (
     <div className="space-y-5">
-      <Card
+      {/* Same glowing drop box as Create Product's first step (.cp-glow). */}
+      <div
+        className="cp-glow !mx-auto"
+        data-active={dragging ? "1" : undefined}
+        role="button"
+        tabIndex={0}
+        onClick={() => inputRef.current?.click()}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); inputRef.current?.click(); }
+        }}
         onDragOver={(e) => {
           e.preventDefault();
           onDragStateChange(true);
@@ -378,26 +419,7 @@ function EmptyState({
           const dropped = e.dataTransfer.files?.[0];
           if (dropped) onFile(dropped);
         }}
-        className={cn(
-          "border-2 border-dashed p-10 text-center transition",
-          dragging ? "border-accent-500 bg-accent-500/5" : "border-ink-700",
-        )}
       >
-        <span className="mx-auto grid h-12 w-12 place-items-center rounded-xl bg-ink-800 text-zinc-500 dark:text-zinc-400">
-          <FileSpreadsheet className="h-5 w-5" aria-hidden />
-        </span>
-        <h2 className="mt-4 text-lg font-semibold text-zinc-900 dark:text-zinc-100">
-          Drop your TeePublic earnings export
-        </h2>
-        <p className="mx-auto mt-1.5 max-w-md text-sm text-zinc-500 dark:text-zinc-400">
-          A .csv or .xlsx from TeePublic → Dashboard → Earnings. It&apos;s parsed in your browser
-          and never uploaded anywhere.
-        </p>
-
-        <Button className="mt-5 gap-2" onClick={() => inputRef.current?.click()}>
-          <Upload className="h-4 w-4" aria-hidden />
-          Choose file
-        </Button>
         <input
           ref={inputRef}
           type="file"
@@ -407,11 +429,20 @@ function EmptyState({
           aria-hidden
           tabIndex={-1}
         />
-
+        <div className="cp-glow-icon" aria-hidden>
+          <Upload className="h-7 w-7" strokeWidth={1.8} />
+        </div>
+        <h3>Drop your TeePublic earnings export</h3>
+        <p>
+          A .csv or .xlsx from TeePublic → Dashboard → Earnings, or <u>browse</u>.
+          <br />
+          It&apos;s read in your browser and never uploaded anywhere.
+        </p>
+        <span className="cp-pill">Select file</span>
         {error && (
-          <p className="mx-auto mt-4 max-w-md text-sm text-danger-600 dark:text-danger-500">{error}</p>
+          <p role="alert" className="!mb-0 !mt-4 max-w-md text-sm !text-danger-500">{error}</p>
         )}
-      </Card>
+      </div>
       {mapping}
     </div>
   );

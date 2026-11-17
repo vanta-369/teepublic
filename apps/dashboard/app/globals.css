@@ -266,7 +266,7 @@ html, body {
 
   /* Sidebar nav rows. */
   .su-navitem {
-    @apply flex items-center gap-3 px-3 py-2.5 text-sm transition;
+    @apply flex items-center gap-3 px-3 py-[7px] text-sm transition whitespace-nowrap;
     border-radius: 0.75rem;
     color: rgb(var(--zinc-600));
   }
@@ -280,11 +280,15 @@ html, body {
   }
   .dark .su-navitem-active { background: rgb(var(--ink-800)); color: rgb(var(--zinc-100)); }
 
+  /* Short windows: the list may still scroll, but without a scrollbar. */
+  .su-nav { scrollbar-width: none; }
+  .su-nav::-webkit-scrollbar { display: none; }
+
   /* Raised icon tile inside each nav row. */
   .su-navicon {
     @apply grid place-items-center shrink-0 transition;
-    height: 2rem; width: 2rem;
-    border-radius: 0.65rem;
+    height: 1.875rem; width: 1.875rem;
+    border-radius: 0.6rem;
     background: rgb(var(--ink-900));
     box-shadow: var(--su-shadow-sm);
     color: rgb(var(--accent-600));
@@ -401,3 +405,320 @@ html, body {
   .dark .viz-glow .recharts-bar-rectangle path,
   .dark .viz-glow .recharts-line-curve { filter: none; }
 }
+
+/* ── Listings view — the extension side panel's look ─────────────────────────
+   Same palette, type and controls as apps/extension/src/sidepanel/style.css
+   (lime gradient + near-black text, Barlow Condensed uppercase, 12px cards).
+   Display font copied from the extension, bundled locally (no CDN). */
+@font-face {
+  font-family: "Barlow Condensed";
+  src: url("/fonts/Display-700.woff2") format("woff2");
+  font-weight: 700; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: "Barlow Condensed";
+  src: url("/fonts/Display-800.woff2") format("woff2");
+  font-weight: 800; font-style: normal; font-display: swap;
+}
+.hs-view {
+  /* The sheet's own palette - independent of the site theme. */
+  --primary: #D1FE17;          /* the logo lime (public/higgstee-mark.png) */
+  --table-header: #1D1D1B;     /* the logo dark */
+  --table-row: #FFFFFF;
+  --table-row-alt: #F2F3F5;
+  --table-text: #161719;
+  --radius-sm: 8px;
+  --hs-display: "Barlow Condensed", "Arial Narrow", var(--font);
+  --hs-lime: var(--primary);
+  --hs-lime-alt: #AFD912;
+  /* Always white, light or dark site theme - it's a product sheet. */
+  --hs-bg: #FFFFFF;
+  --hs-panel: #FFFFFF;
+  --hs-cell: #FFFFFF;
+  --hs-cell-alt: var(--table-row-alt);
+  --hs-pill-mute: #E8E8E8;
+  --hs-hover: #F6FBE6;
+  --hs-border: #E3E3E3;
+  --hs-text: var(--table-text);
+  --hs-muted: #6B6B6B;
+  --hs-accent: #4A6608;
+  --hs-lime-grad: linear-gradient(180deg, #E4FF8A 0%, #C2F24E 100%);
+  --hs-on-lime: #141414;
+  --hs-sel: rgba(209, 254, 23, 0.32);
+  --hs-sel-line: #141414;
+  --hs-glow: transparent;
+  --hs-btn-bg: #FFFFFF;
+  --hs-btn-border: #D4D4D4;
+  --hs-danger: #DC2626;
+  --hs-ok: #059669;
+  background: var(--hs-bg);
+  color: var(--hs-text);
+  font-family: Arial, "Helvetica Neue", Helvetica, sans-serif;
+}
+.dark .hs-view {
+  --hs-display: "Barlow Condensed", "Arial Narrow", var(--font);
+  --hs-lime: var(--primary);
+  --hs-lime-alt: #AFD912;
+  /* Always white, light or dark site theme - it's a product sheet. */
+  --hs-bg: #FFFFFF;
+  --hs-panel: #FFFFFF;
+  --hs-cell: #FFFFFF;
+  --hs-cell-alt: var(--table-row-alt);
+  --hs-pill-mute: #E8E8E8;
+  --hs-hover: #F6FBE6;
+  --hs-border: #E3E3E3;
+  --hs-text: var(--table-text);
+  --hs-muted: #6B6B6B;
+  --hs-accent: #4A6608;
+  --hs-lime-grad: linear-gradient(180deg, #E4FF8A 0%, #C2F24E 100%);
+  --hs-on-lime: #141414;
+  --hs-sel: rgba(209, 254, 23, 0.32);
+  --hs-sel-line: #141414;
+  --hs-glow: transparent;
+  --hs-btn-bg: #FFFFFF;
+  --hs-btn-border: #D4D4D4;
+  --hs-danger: #DC2626;
+  --hs-ok: #059669;
+}
+
+.hs-title { font-family: var(--hs-display); font-size: 30px; font-weight: 800; text-transform: uppercase; letter-spacing: -0.01em; line-height: 1; }
+.hs-display { font-family: var(--hs-display); text-transform: uppercase; letter-spacing: 0.02em; }
+
+.hs-stat { display: flex; flex-direction: column; gap: 2px; min-width: 92px; padding: 8px 12px; background: var(--hs-panel); border: 1px solid var(--hs-border); border-radius: 12px; }
+.hs-stat-num { font-family: var(--hs-display); font-size: 26px; font-weight: 800; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.hs-stat-label { font-family: var(--hs-display); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.02em; color: var(--hs-muted); }
+
+.hs-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  height: 42px; padding: 0 18px; border-radius: 12px;
+  background: var(--hs-btn-bg); border: 1px solid var(--hs-btn-border); color: var(--hs-text);
+  font-family: var(--hs-display); font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.02em;
+  transition: all .2s ease; white-space: nowrap;
+}
+.hs-btn:hover { border-color: var(--hs-sel-line); box-shadow: 0 0 16px var(--hs-glow); transform: translateY(-1px); }
+.hs-btn:disabled { opacity: .4; pointer-events: none; }
+.hs-btn-primary { border-color: var(--hs-sel-line); font-size: 16px; box-shadow: 0 0 18px var(--hs-glow); }
+
+.hs-kbd { font-family: var(--hs-display); font-weight: 700; font-size: 12px; letter-spacing: .02em; text-transform: uppercase; padding: 1px 6px; border-radius: 6px; border: 1px solid var(--hs-btn-border); color: var(--hs-accent); background: var(--hs-btn-bg); }
+
+/* Product-list look (matches the TeePublic Product List sheet): lime bar on
+   top, black header with lime icons and small filter boxes, lime row numbers,
+   white/grey one-line rows, the primary tag as a wide lime pill and adult
+   content as a grey pill. */
+.hs-grid { background: var(--table-row); }
+.hs-grid table { color: var(--table-text); }
+.hs-th {
+  position: relative; padding: 0 26px 0 10px; height: 40px; text-align: left; cursor: pointer;
+  background: var(--table-header); color: #fff;
+  font-size: 16px; font-weight: 700; letter-spacing: -0.01em; white-space: nowrap;
+  border-right: 1px solid #2a2c30;
+}
+.hs-th:hover, .hs-th[data-on="1"] { background: #24272b; }
+.hs-th-icon { color: var(--hs-lime); }
+.hs-th-caret {
+  position: absolute; right: 5px; bottom: 4px;
+  display: grid; place-items: center; width: 14px; height: 14px;
+  background: #3a3c41; border-radius: 2px; color: #e6e6e6;
+}
+.hs-th-caret[data-full="1"] { background: var(--hs-lime); color: var(--table-header); }
+.hs-th-corner {
+  position: relative; height: 40px; text-align: center; cursor: pointer;
+  background: var(--table-header); color: #fff; font-size: 16px; font-weight: 800;
+  border-right: 1px solid #2a2c30;
+}
+
+.hs-td { position: relative; padding: 0 8px; height: 30px; vertical-align: middle; background: var(--table-row); border-right: 1px solid #E4E5E8; border-bottom: 1px solid #E4E5E8; }
+.hs-grid tbody tr:nth-child(even) > .hs-td { background: var(--table-row-alt); }
+.hs-grid tbody tr:hover > .hs-td { background: #EEF5D6; }
+.hs-grid .hs-td[data-sel="1"] { background: var(--hs-sel) !important; }
+.hs-grid .hs-td[data-missing="1"]:not([data-sel="1"]) { background: color-mix(in srgb, var(--hs-danger) 8%, var(--table-row)) !important; }
+.hs-cell { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 14px; line-height: 20px; }
+.hs-col-filename { font-weight: 500; }
+.hs-col-title { font-weight: 700; }
+.hs-col-description, .hs-col-supporting_tags { color: #2b2d31; }
+.hs-col-primary_tag, .hs-col-adult_content { text-align: center; }
+.hs-col-primary_tag { padding: 0 2px; }
+/* Wide lime pill, dark-olive bold text. */
+.hs-pill {
+  display: block; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 1px 10px; border-radius: 7px;
+  background: var(--hs-lime);
+  color: #1D1D1B; font-weight: 700; line-height: 19px;
+}
+.hs-pill-mute {
+  display: inline-block; min-width: 50px; padding: 0 12px; border-radius: 999px;
+  background: #E1E2E5; color: #1b1c1f; font-weight: 700; line-height: 19px;
+}
+/* adult_content switch: grey "no", red "yes" (mature), dashed when empty. */
+.hs-pill-yes {
+  display: inline-block; min-width: 50px; padding: 0 12px; border-radius: 999px;
+  background: #FDE2E1; color: #B42318; font-weight: 800; line-height: 19px;
+  box-shadow: inset 0 0 0 1px #F5A7A1;
+}
+.hs-pill-empty {
+  display: inline-block; min-width: 50px; padding: 0 12px; border-radius: 999px;
+  border: 1px dashed #B9BBC0; color: #8A8D93; font-weight: 700; line-height: 17px;
+}
+.hs-col-adult_content button { cursor: pointer; transition: transform .1s ease, filter .1s ease; }
+.hs-col-adult_content button:hover { filter: brightness(0.95); }
+.hs-col-adult_content button:active { transform: scale(0.95); }
+.hs-col-adult_content button[data-bad="1"] { box-shadow: inset 0 0 0 1.5px var(--hs-danger); color: var(--hs-danger); }
+
+.hs-rownum {
+  position: sticky; left: 0; z-index: 10; text-align: center; cursor: pointer;
+  background: var(--table-header); color: var(--hs-lime); font-size: 15px; font-weight: 800;
+  border-right: 1px solid #2a2a27; border-bottom: 1px solid #2a2a27;
+}
+.hs-rownum[data-on="1"] { background: #2b2b28; }
+/* Selection stays black - just a lighter shade, no lime. */
+.hs-grid tbody tr > .hs-rownum[data-row="1"] { background: #34342f; }
+
+/* Design preview on hovering a filename cell. */
+.hs-peek {
+  display: none; position: absolute; left: calc(100% + 6px); top: 50%; z-index: 40; transform: translateY(-50%);
+  flex-direction: column; align-items: center; gap: 4px; padding: 6px; pointer-events: none;
+  background: #fff; border: 1px solid #D9DADF; border-radius: 10px; box-shadow: 0 12px 30px rgba(0, 0, 0, 0.18);
+  font-size: 11px; font-weight: 700; color: #4b4e55;
+}
+.hs-peek img { width: 120px; height: 120px; object-fit: contain; background: #F2F3F5; border-radius: 6px; }
+.hs-td:hover > .hs-peek { display: flex; }
+
+/* Top bar of the view - dark in both themes, like the product list. */
+.hs-bar {
+  position: sticky; left: 0;  /* stays put when a wide table scrolls sideways */
+  display: flex; flex-wrap: wrap; align-items: center; gap: 14px 28px; flex-shrink: 0;
+  padding: 14px 24px; background: var(--table-header); color: #fff;
+}
+.hs-bar-brand { font-size: 26px; font-weight: 800; letter-spacing: -0.02em; line-height: 1; }
+.hs-bar-div { align-self: stretch; width: 2px; background: rgba(255, 255, 255, 0.25); }
+.hs-bar-stat { display: inline-flex; align-items: center; gap: 8px; font-size: 18px; font-weight: 700; white-space: nowrap; }
+.hs-bar-stat svg { width: 26px; height: 26px; color: var(--hs-lime); }
+.hs-bar-stat[data-bad="1"] svg { color: #F87171; }
+.hs-bar .hs-btn { background: rgba(255, 255, 255, 0.06); border-color: rgba(255, 255, 255, 0.25); color: #fff; }
+.hs-bar .hs-btn-primary { background: var(--hs-lime); border-color: var(--hs-lime); color: #141414; box-shadow: none; }
+.hs-bar .hs-btn:hover { border-color: var(--hs-lime); box-shadow: 0 0 14px rgba(209, 254, 23, 0.3); }
+.hs-active { position: absolute; inset: 0; z-index: 1; pointer-events: none; border: 2px solid var(--hs-sel-line); box-shadow: 0 0 12px var(--hs-glow); }
+.hs-handle { position: absolute; right: -5px; bottom: -5px; z-index: 2; width: 10px; height: 10px; cursor: crosshair; background: var(--hs-sel-line); border: 2px solid var(--hs-cell); border-radius: 2px; }
+.hs-editor { position: absolute; left: 0; top: 0; z-index: 30; width: 100%; padding: 8px 10px; font-size: 14px; line-height: 20px; outline: none; user-select: text; background: var(--hs-cell); color: var(--hs-text); border: 2px solid var(--hs-sel-line); box-shadow: 0 0 16px var(--hs-glow); }
+.hs-required { font-size: 12px; font-style: italic; color: var(--hs-danger); opacity: .8; }
+
+.hs-menu { position: fixed; z-index: 60; min-width: 230px; padding: 6px; border-radius: 12px; background: var(--hs-panel); border: 1px solid var(--hs-border); box-shadow: 0 20px 50px rgba(0,0,0,.35); }
+.hs-menu button { width: 100%; display: flex; justify-content: space-between; gap: 24px; padding: 7px 10px; border-radius: 8px; font-size: 13px; text-align: left; color: var(--hs-text); }
+.hs-menu button:hover:not(:disabled) { background: var(--hs-sel); }
+.hs-menu button:disabled { opacity: .4; }
+.hs-menu button[data-danger="1"] { color: var(--hs-danger); }
+.hs-menu hr { margin: 4px 0; border: 0; border-top: 1px solid var(--hs-border); }
+.hs-note { align-self: flex-start; cursor: pointer; padding: 6px 12px; border-radius: 999px; font-size: 12px; border: 1px solid var(--hs-btn-border); color: var(--hs-accent); background: var(--hs-btn-bg); }
+
+/* Issues filter (in the red issues box). */
+.hs-filter {
+  height: 36px; padding: 0 14px; border-radius: 999px; font-size: 13px; font-weight: 700;
+  border: 1px solid var(--hs-border); background: var(--hs-cell); color: var(--hs-text);
+}
+.hs-filter:hover:not(:disabled) { border-color: var(--table-header); }
+.hs-filter[data-on="1"] { background: var(--table-header); border-color: var(--table-header); color: var(--hs-lime); }
+.hs-filter:disabled { opacity: .45; }
+
+/* Value bar above the table (Excel's formula bar): cell name, fx, full value. */
+.hs-fbar {
+  position: sticky; top: 0; left: 0; z-index: 35;
+  display: flex; align-items: stretch; height: 44px;
+  background: #fff; border-bottom: 1px solid #D9DADF; border-top: 1px solid #D9DADF;
+}
+.hs-fbar-name {
+  display: flex; align-items: center; gap: 6px; flex-shrink: 0; min-width: 170px; padding: 0 14px;
+  border-right: 1px solid #D9DADF; font-size: 13px; font-weight: 800; color: var(--table-header); white-space: nowrap;
+}
+.hs-fbar-name span { color: #9A9CA2; font-weight: 700; }
+.hs-fbar-fx {
+  display: grid; place-items: center; width: 40px; flex-shrink: 0;
+  border-right: 1px solid #D9DADF; font-style: italic; font-weight: 700; color: #6B6E75; font-family: Georgia, serif;
+}
+.hs-fbar-box { position: relative; flex: 1; min-width: 0; }
+.hs-fbar-box textarea {
+  position: absolute; left: 0; top: 0; width: 100%; height: 100%; resize: none; overflow: hidden;
+  padding: 11px 14px; border: 0; outline: none; background: transparent;
+  font-size: 14px; line-height: 20px; color: var(--table-text); white-space: nowrap;
+}
+/* Focused: opens up over the table so long descriptions can be read and edited. */
+.hs-fbar-box textarea:focus {
+  height: auto; min-height: 100%; max-height: 180px; overflow: auto; white-space: pre-wrap; z-index: 2;
+  background: #fff; box-shadow: 0 0 0 2px var(--table-header), 0 14px 30px rgba(0, 0, 0, 0.15);
+  field-sizing: content;
+}
+
+/* ── Create Product (From spreadsheet) - step-by-step, no outlines ─────────
+   Site tokens only (ink / zinc / accent), so light and dark both follow the
+   site theme. */
+.cp-soft .surface,
+.cp-soft .surface-soft,
+.cp-soft .dropzone { border-color: transparent; }
+.cp-soft .surface { box-shadow: 0 8px 24px -12px rgb(0 0 0 / 0.35); }
+.cp-soft .input:focus { border-color: rgb(var(--accent-500) / 0.7); }
+
+.cp-hero-title {
+  /* As in the approved preview: two lines, dim first line, lighter second. */
+  margin: 8px 0 26px; text-align: left; font-size: clamp(44px, 5vw, 60px); line-height: 1.02;
+  font-weight: 500; letter-spacing: -0.04em; color: #3f3f3f;
+}
+.cp-hero-title span { display: block; color: #6b6b6b; }
+:root:not(.dark) .cp-hero-title { color: #a3a3a3; }
+:root:not(.dark) .cp-hero-title span { color: #525252; }
+
+.cp-glow {
+  max-width: 760px; margin: 0; min-height: 300px; border-radius: 32px; padding: 44px 28px 40px; text-align: center; cursor: pointer;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  background: radial-gradient(120% 90% at 50% 40%, rgb(var(--ink-800)) 0%, rgb(var(--ink-900)) 60%, rgb(var(--ink-950)) 100%);
+  /* A soft light around the edge, as in the reference. */
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.05), 0 0 60px rgb(255 255 255 / 0.07), inset 0 0 36px rgb(255 255 255 / 0.07);
+  transition: box-shadow .2s ease, transform .2s ease;
+}
+.cp-glow:hover, .cp-glow[data-active="1"] {
+  box-shadow: 0 0 0 1px rgb(var(--accent-500) / 0.25), 0 0 80px rgb(var(--accent-500) / 0.12), inset 0 1px 0 rgb(255 255 255 / 0.06);
+}
+:root:not(.dark) .cp-glow {
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.04), 0 20px 60px -20px rgb(0 0 0 / 0.18);
+}
+.cp-glow-icon {
+  width: 64px; height: 64px; margin: 0 auto 18px; border-radius: 999px; display: grid; place-items: center;
+  background: rgb(var(--ink-900)); color: rgb(var(--accent-500));
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.08), 0 0 26px rgb(var(--accent-500) / 0.2);
+}
+:root:not(.dark) .cp-glow-icon { color: rgb(var(--accent-600)); }
+.cp-glow h3 { font-size: 22px; font-weight: 600; letter-spacing: -0.02em; color: rgb(var(--zinc-900)); }
+.dark .cp-glow h3 { color: rgb(var(--zinc-100)); }
+.cp-glow p { margin: 6px 0 22px; font-size: 14px; color: rgb(var(--zinc-400)); }
+.cp-glow .cp-pill { padding: 11px 28px; font-size: 14px; }
+.cp-glow p u { color: rgb(var(--zinc-600)); }
+.dark .cp-glow p u { color: rgb(var(--zinc-300)); }
+
+.cp-pill {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 10px 22px; border-radius: 999px; font-size: 14px; font-weight: 600;
+  background: rgb(var(--ink-800)); color: rgb(var(--zinc-900));
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.08); transition: background .15s ease;
+}
+.dark .cp-pill { color: rgb(var(--zinc-100)); }
+.cp-pill:hover:not(:disabled) { background: rgb(var(--ink-700)); }
+.cp-pill:disabled { opacity: .5; cursor: not-allowed; }
+.cp-pill-primary { background: var(--btn-pri-bg); color: var(--btn-pri-fg); box-shadow: none; font-weight: 700; }
+.dark .cp-pill-primary { color: var(--btn-pri-fg); }
+.cp-pill-primary:hover:not(:disabled) { background: var(--btn-pri-bg); filter: brightness(1.06); }
+
+.cp-link { font-size: 13px; color: rgb(var(--zinc-500)); text-decoration: underline; text-underline-offset: 3px; }
+.dark .cp-link { color: rgb(var(--zinc-300)); }
+.cp-link:hover { color: rgb(var(--accent-600)); }
+.dark .cp-link:hover { color: rgb(var(--accent-400)); }
+
+.cp-quiet { border-radius: 18px; padding: 16px 18px; background: rgb(var(--ink-900)); }
+.cp-error { font-size: 13px; color: rgb(var(--danger-500)); }
+
+/* Native <select> option lists. A transparent select lets Windows Chrome draw
+   the popup white while the options inherit the dark theme's light text -
+   unreadable. Give the options their own colours in both themes. */
+select option { background-color: #ffffff; color: #171717; }
+.dark select option { background-color: #1f1f1f; color: #f5f5f5; }
+select option:checked { background-color: #e6ffb0; color: #171717; }
+.dark select option:checked { background-color: #3a4a12; color: #ffffff; }
+.cp-glow[data-disabled="1"] { opacity: .35; cursor: not-allowed; filter: saturate(0.4); }
+.cp-glow[data-disabled="1"]:hover { box-shadow: 0 0 0 1px rgb(255 255 255 / 0.05), 0 0 60px rgb(255 255 255 / 0.07), inset 0 0 36px rgb(255 255 255 / 0.07); }

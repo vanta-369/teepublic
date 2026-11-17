@@ -46,6 +46,9 @@ export interface QueueBatch {
     rowCount: number;
     matchedCount: number;
   };
+  /** The project (one TeePublic account) this batch publishes for - its uploads
+   *  count toward it. Left out by older batches: they count to the total only. */
+  projectId?: string;
 }
 
 export interface ValidationIssue {

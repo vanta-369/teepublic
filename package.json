@@ -13,9 +13,10 @@
     "dev:extension": "npm run dev --workspace=@teepublic/extension",
     "build:extension": "npm run build --workspace=@teepublic/extension",
     "build:dashboard": "npm run build --workspace=@teepublic/dashboard",
+    "build:canva": "npm run build --workspace=@teepublic/canva",
     "release:extension": "npm run release --workspace=@teepublic/extension",
     "test": "node tests/run.mjs",
-    "typecheck": "npm run typecheck --workspace=@teepublic/dashboard && npm run typecheck --workspace=@teepublic/extension",
+    "typecheck": "npm run typecheck --workspace=@teepublic/dashboard && npm run typecheck --workspace=@teepublic/extension && npm run typecheck --workspace=@teepublic/canva",
     "verify": "npm run typecheck && npm test && npm run build:extension && npm run build:dashboard"
   },
   "engines": {

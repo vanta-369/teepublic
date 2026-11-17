@@ -1,14 +1,22 @@
 // Central brand + navigation config. One source of truth for the marketing
 // navbar, the dashboard sidebar, and shared links so labels/routes never drift.
 
+import { GEMINI_BROWSER_JOBS } from "@teepublic/shared";
+
 export const BRAND = "Higgstee";
 export const BRAND_TAGLINE = "Prepare once, upload everywhere.";
 export const BRAND_BLURB =
   "Higgstee helps print-on-demand sellers prepare a product once and auto-upload it to TeePublic, Etsy, Teachers Pay Teachers, and Redbubble with a browser extension.";
 
-// The extension is distributed via the Chrome Web Store. Replace with the real
-// listing URL once published; the public /download-extension page links here.
-export const EXTENSION_STORE_URL = "https://chromewebstore.google.com/";
+// The extension is distributed via the Chrome Web Store. Every "Add to Chrome"
+// button on the site links here.
+export const EXTENSION_STORE_URL =
+  "https://chromewebstore.google.com/detail/higgstee-%E2%80%94-pod-listing-up/obkkmfkhfofjemedkdmemdadbcodjdpn";
+
+// The published Web Store extension. The dashboard connects to this ID and no
+// other: there is no manual-ID override. (A manually loaded, unpacked build
+// gets a different ID, so it won't connect.)
+export const EXTENSION_ID = "obkkmfkhfofjemedkdmemdadbcodjdpn";
 
 export interface NavLink {
   label: string;
@@ -41,7 +49,7 @@ export const FOOTER_LEGAL: NavLink[] = [
   { label: "Terms of Service", href: "/terms" },
 ];
 
-// Dashboard sidebar. `icon` keys map to inline SVGs in the Sidebar component.
+// Dashboard sidebar. `icon` keys map to Lucide icons in DashboardShell (ICONS).
 export interface SidebarLink extends NavLink {
   icon: string;
 }
@@ -53,6 +61,8 @@ export interface SidebarLink extends NavLink {
 export const DASHBOARD_NAV: SidebarLink[] = [
   { label: "Dashboard", href: "/dashboard", icon: "home" },
   { label: "Create Product", href: "/dashboard/create", icon: "plus" },
+  // Google-account generation - hidden while GEMINI_BROWSER_JOBS is off (packages/shared/src/features.ts).
+  ...(GEMINI_BROWSER_JOBS ? [{ label: "Connect account", href: "/dashboard/gemini", icon: "sparkle" } as SidebarLink] : []),
   { label: "Uploads", href: "/dashboard/uploads", icon: "upload" },
   { label: "Sales & Earnings", href: "/dashboard/analytics", icon: "chart" },
   { label: "Extension", href: "/dashboard/extension", icon: "puzzle" },

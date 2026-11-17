@@ -69,14 +69,31 @@ async function unclaim(itemId: string): Promise<void> {
   }
 }
 
+/** Item ids counted as FAILED on their project. Ids only, like COUNTED_KEY. */
+const FAILED_KEY = "teepublic.countedFailed";
+
+async function readFailed(): Promise<string[]> {
+  const all = await chrome.storage.local.get(FAILED_KEY);
+  const list = all[FAILED_KEY];
+  return Array.isArray(list) ? (list as string[]) : [];
+}
+
+async function writeFailed(list: string[]): Promise<void> {
+  while (list.length > COUNTED_MAX) list.shift();
+  await chrome.storage.local.set({ [FAILED_KEY]: list });
+}
+
 /** Drop every remembered id. Called when the queue is cleared. */
 export async function resetCountedItems(): Promise<void> {
-  await chrome.storage.local.remove(COUNTED_KEY);
+  await chrome.storage.local.remove([COUNTED_KEY, FAILED_KEY]);
 }
 
 export interface UploadCountedInput {
   /** Local queue item id. Used ONLY for local dedupe; never transmitted. */
   itemId: string;
+  /** The batch's project (migration 0013). Sent alone - an id, nothing about
+   *  the design. Without one, only the account total moves. */
+  projectId?: string;
 }
 
 /**
@@ -106,15 +123,57 @@ export async function countSuccessfulUpload(input: UploadCountedInput): Promise<
       return;
     }
 
-    // No arguments: the function takes none and derives the row from
-    // auth.uid(). There is no user id, design id, title or URL on the wire.
-    const { error } = await client.rpc("increment_upload_count");
+    // The account comes from auth.uid() on the server. With a project, the
+    // project id is the only argument (its RPC bumps the total too); without
+    // one, the no-argument total counter. No design id, title or URL.
+    const { error } = input.projectId
+      ? await client.rpc("increment_project_upload_count", { p_project: input.projectId })
+      : await client.rpc("increment_upload_count");
     if (error) {
       await unclaim(input.itemId);
       console.warn(`[higgstee] upload count not recorded: ${error.message}`);
+      return;
+    }
+
+    // It failed earlier and a retry published it: it is not a failure any more.
+    if (input.projectId) {
+      const failed = await readFailed();
+      const i = failed.indexOf(input.itemId);
+      if (i >= 0) {
+        const { error: undoErr } = await client.rpc("record_project_upload_failure", { p_project: input.projectId, p_delta: -1 });
+        if (!undoErr) { failed.splice(i, 1); await writeFailed(failed); }
+      }
     }
   } catch (err) {
     if (claimed) await unclaim(input.itemId).catch(() => {});
     console.warn("[higgstee] upload count not recorded:", err);
+  }
+}
+
+/**
+ * Add one to the project's failed-uploads count (migration 0014). Each item is
+ * counted once however many times it fails; countSuccessfulUpload takes it
+ * back if a retry publishes it. Never throws; without a project it does
+ * nothing (the account total only counts published designs).
+ */
+export async function countFailedUpload(input: UploadCountedInput): Promise<void> {
+  if (!SUPABASE_CONFIGURED || !input.projectId) return;
+  try {
+    const failed = await readFailed();
+    if (failed.includes(input.itemId) || (await readCounted()).includes(input.itemId)) return;
+
+    const client = supabase();
+    const { data: { user }, error: userErr } = await client.auth.getUser();
+    if (userErr || !user) return;
+
+    const { error } = await client.rpc("record_project_upload_failure", { p_project: input.projectId, p_delta: 1 });
+    if (error) {
+      console.warn(`[higgstee] failed count not recorded: ${error.message}`);
+      return;
+    }
+    failed.push(input.itemId);
+    await writeFailed(failed);
+  } catch (err) {
+    console.warn("[higgstee] failed count not recorded:", err);
   }
 }

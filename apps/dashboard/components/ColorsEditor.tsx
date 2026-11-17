@@ -16,6 +16,11 @@ import {
   type ColorPreset,
 } from "@/lib/colorPresets";
 import type { CustomBasicColor } from "@/lib/batchConfig";
+import { colorHexForLabel } from "@/lib/colorHex";
+
+// Kept here too for the components that already import it from this file.
+export { colorHexForLabel };
+import { pinColor, sortByOrder, unpinColor, useColorPrefs } from "@/lib/colorPrefs";
 
 interface Props {
   productColors: Record<string, string>;
@@ -33,6 +38,9 @@ interface Props {
   /** Total designs in the batch — used to label the button ("Apply to all
    *  18 designs") and to hide it when there's only one design. */
   applyToAllCount?: number;
+  /** "basic": only the Basic-colors swatch row (the design card shows it under
+   *  the artwork). "detail": everything except that row. Default: all of it. */
+  section?: "all" | "basic" | "detail";
 }
 
 export function ColorsEditor({
@@ -46,6 +54,7 @@ export function ColorsEditor({
   onRemoveCustomBasicColor,
   onApplyToAll,
   applyToAllCount,
+  section = "all",
 }: Props) {
   const slugs = productSlugs();
 
@@ -59,13 +68,15 @@ export function ColorsEditor({
     onChange({ productColors: applyBasicColor(name), preset });
   }
 
+  // A swatch is "on" when every product it applies to carries its colour.
+  // With no products enabled yet, compare them all - otherwise nothing is
+  // compared and every swatch would read as selected.
   function isBasicActive(name: string): boolean {
     const resolved = applyBasicColor(name);
-    for (const [slug, label] of Object.entries(SLUG_TO_PRODUCT_LABEL)) {
-      if (!enabledProducts.includes(label)) continue;
-      if (productColors[slug] !== resolved[slug]) return false;
-    }
-    return true;
+    const considered = Object.entries(SLUG_TO_PRODUCT_LABEL)
+      .filter(([slug, label]) => resolved[slug] && (enabledProducts.length === 0 || enabledProducts.includes(label)));
+    if (considered.length === 0) return false;
+    return considered.every(([slug]) => productColors[slug] === resolved[slug]);
   }
 
   // Custom-basic-color adder UI state.
@@ -80,6 +91,136 @@ export function ColorsEditor({
     setDraftHex("#888888");
     setShowAdd(false);
   }
+
+  // Under the design card only White, Black and the colours added from the
+  // "+" list show (added ones stay, on every card), plus whatever is picked.
+  const [listOpen, setListOpen] = useState(false);
+  const { order, pinned } = useColorPrefs();
+  const compact = section === "basic";
+  const isPinned = (name: string) => pinned.some((n) => n.toLowerCase() === name.toLowerCase());
+  const shown = (name: string) => !compact || name === "White" || name === "Black" || isPinned(name) || isBasicActive(name);
+  const basics = sortByOrder(BASIC_COLORS, order);
+  const roundBtn = "h-8 w-8 mt-0.5 rounded-full border-2 border-dashed border-zinc-300 dark:border-white/15 text-zinc-400 dark:text-zinc-500 grid place-items-center text-base hover:border-accent-500 hover:text-accent-500 transition";
+  const allChoices = [
+    ...basics.map((c) => ({ name: c.name, hex: c.hex })),
+    ...customBasicColors.map((c) => ({ name: c.name, hex: c.hex })),
+  ];
+
+  const addForm = (
+    <form onSubmit={submitAdd} className="flex items-center gap-1 surface-soft px-2 py-1.5">
+      <input
+        type="color"
+        value={draftHex}
+        onChange={(e) => setDraftHex(e.target.value)}
+        className="h-7 w-7 rounded cursor-pointer bg-transparent border-0 p-0"
+        aria-label="Pick hex"
+      />
+      <input
+        autoFocus
+        className="input text-xs py-1 w-28"
+        placeholder="Color name"
+        value={draftName}
+        onChange={(e) => setDraftName(e.target.value)}
+      />
+      <button type="submit" className="btn-primary text-xs px-2 py-1">Add</button>
+      <button type="button" onClick={() => { setShowAdd(false); setDraftName(""); }} className="btn-ghost text-xs px-2 py-1">×</button>
+    </form>
+  );
+
+  // Basic-colors row - built-ins + user-added swatches + Add button.
+  const basicRow = (
+        <div className="flex items-start gap-3 flex-wrap">
+          {/* Under the design card's artwork the swatches speak for themselves. */}
+          {section !== "basic" && <span className="text-xs text-zinc-500 dark:text-zinc-400 mt-2 mr-1">Basic colors:</span>}
+
+          {basics.filter((c) => shown(c.name)).map((c) => {
+            const active = isBasicActive(c.name);
+            return (
+              <Swatch
+                key={c.name}
+                name={c.name}
+                hex={c.hex}
+                checkOn={c.checkOn}
+                active={active}
+                disabled={readOnly}
+                onClick={() => !readOnly && applyColor(c.name)}
+                onRemove={compact && !readOnly && isPinned(c.name) ? () => unpinColor(c.name) : undefined}
+              />
+            );
+          })}
+
+          {customBasicColors.filter((c) => shown(c.name)).map((c) => {
+            const active = isBasicActive(c.name);
+            const lum = hexLuminance(c.hex);
+            return (
+              <Swatch
+                key={c.name}
+                name={c.name}
+                hex={c.hex}
+                checkOn={lum > 0.55 ? "dark" : "light"}
+                active={active}
+                custom
+                disabled={readOnly}
+                onClick={() => !readOnly && applyColor(c.name)}
+                onRemove={onRemoveCustomBasicColor ? () => onRemoveCustomBasicColor(c.name) : undefined}
+              />
+            );
+          })}
+
+          {compact && !readOnly && (
+            <div className="relative">
+              <button type="button" onClick={() => setListOpen((o) => !o)} className={roundBtn} aria-label="More colors" aria-expanded={listOpen} title="More colors">+</button>
+              {listOpen && (
+                <>
+                  {/* Click anywhere else to close. */}
+                  <div className="fixed inset-0 z-30" onClick={() => { setListOpen(false); setShowAdd(false); }} aria-hidden />
+                  <div className="absolute left-0 top-10 z-40 w-52 overflow-hidden rounded-xl bg-white py-1 shadow-xl ring-1 ring-black/10 dark:bg-ink-800 dark:ring-white/10">
+                    <p className="px-3 py-1.5 text-[11px] font-medium text-zinc-500">Select color</p>
+                    <div className="max-h-72 overflow-y-auto">
+                      {allChoices.map((c) => {
+                        const active = isBasicActive(c.name);
+                        return (
+                          <button
+                            key={c.name}
+                            type="button"
+                            onClick={() => { applyColor(c.name); pinColor(c.name); setListOpen(false); }}
+                            className={`flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-xs transition hover:bg-zinc-100 dark:hover:bg-ink-700 ${active ? "font-semibold text-accent-600 dark:text-accent-400" : "text-zinc-700 dark:text-zinc-200"}`}
+                          >
+                            <span className="h-5 w-5 shrink-0 rounded ring-1 ring-black/10 dark:ring-white/15" style={{ background: c.hex }} />
+                            <span className="flex-1 truncate">{c.name}</span>
+                            {active && <span aria-hidden>✓</span>}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {onAddCustomBasicColor && (
+                      <div className="border-t border-zinc-200 p-1.5 dark:border-white/10">
+                        {showAdd ? addForm : (
+                          <button type="button" onClick={() => setShowAdd(true)} className="w-full rounded-md px-2 py-1.5 text-left text-xs text-zinc-500 hover:bg-zinc-100 hover:text-accent-500 dark:hover:bg-ink-700">+ Custom colour…</button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* Add custom basic color — only shown if a handler was passed in. */}
+          {!compact && !readOnly && onAddCustomBasicColor && (
+            !showAdd ? (
+              <button
+                type="button"
+                onClick={() => setShowAdd(true)}
+                className={roundBtn}
+                aria-label="Add custom basic color"
+                title="Add custom basic color"
+              >+</button>
+            ) : addForm
+          )}
+        </div>
+  );
+  if (section === "basic") return basicRow;
 
   const canApplyToAll = !readOnly && !!onApplyToAll && (applyToAllCount ?? 0) > 1;
 
@@ -124,75 +265,7 @@ export function ColorsEditor({
         </div>
       </div>
 
-      {/* Basic-colors row — built-ins + user-added swatches + Add button. */}
-      <div className="flex items-start gap-3 flex-wrap">
-        <span className="text-xs text-zinc-500 dark:text-zinc-400 mt-2 mr-1">Basic colors:</span>
-
-        {BASIC_COLORS.map((c) => {
-          const active = isBasicActive(c.name);
-          return (
-            <Swatch
-              key={c.name}
-              name={c.name}
-              hex={c.hex}
-              checkOn={c.checkOn}
-              active={active}
-              disabled={readOnly}
-              onClick={() => !readOnly && applyColor(c.name)}
-            />
-          );
-        })}
-
-        {customBasicColors.map((c) => {
-          const active = isBasicActive(c.name);
-          const lum = hexLuminance(c.hex);
-          return (
-            <Swatch
-              key={c.name}
-              name={c.name}
-              hex={c.hex}
-              checkOn={lum > 0.55 ? "dark" : "light"}
-              active={active}
-              custom
-              disabled={readOnly}
-              onClick={() => !readOnly && applyColor(c.name)}
-              onRemove={onRemoveCustomBasicColor ? () => onRemoveCustomBasicColor(c.name) : undefined}
-            />
-          );
-        })}
-
-        {/* Add custom basic color — only shown if a handler was passed in. */}
-        {!readOnly && onAddCustomBasicColor && (
-          !showAdd ? (
-            <button
-              type="button"
-              onClick={() => setShowAdd(true)}
-              className="h-8 w-8 mt-0.5 rounded-full border-2 border-dashed border-zinc-300 dark:border-white/15 text-zinc-400 dark:text-zinc-500 grid place-items-center text-base hover:border-accent-500 hover:text-accent-500 transition"
-              aria-label="Add custom basic color"
-              title="Add custom basic color"
-            >+</button>
-          ) : (
-            <form onSubmit={submitAdd} className="flex items-center gap-1 surface-soft px-2 py-1.5">
-              <input
-                type="color"
-                value={draftHex}
-                onChange={(e) => setDraftHex(e.target.value)}
-                className="h-7 w-7 rounded cursor-pointer bg-transparent border-0 p-0"
-                aria-label="Pick hex"
-              />
-              <input
-                autoFocus
-                className="input text-xs py-1 w-28"
-                placeholder="Color name"
-                value={draftName}
-                onChange={(e) => setDraftName(e.target.value)}
-              />
-              <button type="submit" className="btn-primary text-xs px-2 py-1">Add</button>
-              <button type="button" onClick={() => { setShowAdd(false); setDraftName(""); }} className="btn-ghost text-xs px-2 py-1">×</button>
-            </form>
-          )
-        )}
-      </div>
+      {section === "all" && basicRow}
 
       {/* Per-product colors — split into two columns so every product is
           visible at once (half the scrolling). Falls back to one column on
@@ -218,8 +291,8 @@ export function ColorsEditor({
                   style={{ background: colorHexForLabel(selected) }}
                 />
                 <select
-                  // The native option popup follows the document color-scheme
-                  // (set on <html> per theme), so it's readable in light + dark.
+                  // Options get explicit colours in globals.css - a transparent
+                  // select would otherwise show a white list with light text.
                   className="flex-1 min-w-0 bg-transparent text-sm outline-none disabled:cursor-not-allowed"
                   value={selected}
                   onChange={(e) => setColor(slug, e.target.value)}
@@ -264,14 +337,14 @@ function Swatch({
         className={`relative h-8 w-8 rounded-full shadow-sm transition
           ring-2 ${active ? "ring-accent-500 ring-offset-2 ring-offset-white dark:ring-offset-ink-900" : "ring-zinc-300 dark:ring-white/10"}
           ${disabled ? "opacity-60 cursor-not-allowed" : "group-hover:ring-accent-500/60"}`}
-        style={{ backgroundColor: hex }}
+        style={{ background: hex }}
       >
         {active && (
           <span className={`absolute inset-0 grid place-items-center text-xs font-bold ${checkOn === "light" ? "text-white" : "text-black"}`}>✓</span>
         )}
       </button>
       <span className="text-[10px] text-zinc-500 dark:text-zinc-400 max-w-[64px] truncate">{name}</span>
-      {custom && onRemove && !disabled && (
+      {onRemove && !disabled && (
         <button
           type="button"
           onClick={onRemove}
@@ -284,32 +357,6 @@ function Swatch({
   );
 }
 
-// Catalog labels don't carry a hex, so map common color words to a
-// representative swatch for the dropdown dot. Combos ("White/Black") use the
-// first token; unknown labels fall back to a neutral grey.
-const COLOR_HEX: Record<string, string> = {
-  "light grey": "#d1d5db", "light gray": "#d1d5db",
-  "vintage heather": "#a8a29e", "royal blue": "#2563eb", "kelly green": "#16a34a",
-  black: "#0a0a0a", white: "#ffffff", navy: "#1e293b", blue: "#2563eb",
-  red: "#dc2626", maroon: "#7f1d1d", green: "#16a34a", forest: "#14532d",
-  yellow: "#facc15", gold: "#d4af37", pink: "#ec4899", purple: "#9333ea",
-  orange: "#ea580c", heather: "#9ca3af", grey: "#9ca3af", gray: "#9ca3af",
-  charcoal: "#374151", asphalt: "#3f3f46", silver: "#cbd5e1", cream: "#f5f5dc",
-  natural: "#e7e0cf", tan: "#d2b48c", khaki: "#c3b091", brown: "#78350f",
-  teal: "#0d9488", sage: "#9caf88", olive: "#6b7d3a", indigo: "#4f46e5",
-};
-
-export function colorHexForLabel(label: string): string {
-  if (!label) return "#52525b";
-  const l = label.toLowerCase().trim();
-  const first = l.split("/")[0].trim();
-  if (COLOR_HEX[l]) return COLOR_HEX[l];
-  if (COLOR_HEX[first]) return COLOR_HEX[first];
-  for (const key of Object.keys(COLOR_HEX)) {
-    if (first.includes(key)) return COLOR_HEX[key];
-  }
-  return "#52525b";
-}
 
 function hexLuminance(hex: string): number {
   const h = hex.replace("#", "");

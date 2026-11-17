@@ -154,6 +154,30 @@ test("the only upload statistic read is the aggregate counter", () => {
   assert.deepEqual(offendingLines([...DASH_SOURCES, ...EXT_SOURCES], /get_upload_stats/), []);
 });
 
+test("projects (0013) are reached from one module each, carrying only a name or an id", () => {
+  // The table: only the dashboard's projects module touches it, plus the
+  // extension's, which only reads the list (to pick a project in the side panel).
+  const table = offendingLines([...DASH_SOURCES, ...EXT_SOURCES], /\.from\(\s*["'`]projects["'`]/);
+  assert.ok(table.length > 0, "lib/projects.ts must use the table");
+  for (const hit of table) assert.match(hit, /^apps\/(dashboard|extension\/src)\/lib\/projects\.ts:/, `unexpected projects access: ${hit}`);
+  const extProjects = readFileSync(path.join(ROOT, "apps/extension/src/lib/projects.ts"), "utf8");
+  assert.ok(!/\.(insert|update|upsert|delete)\(/.test(extProjects), "the extension must only read projects");
+  // The project counter: only the extension's upload counter calls it, with the id alone.
+  const rpc = offendingLines([...DASH_SOURCES, ...EXT_SOURCES], /increment_project_upload_count/);
+  assert.ok(rpc.length > 0, "the upload counter must call the project RPC");
+  for (const hit of rpc) {
+    assert.match(hit, /^apps\/extension\/src\/lib\/uploadCounter\.ts:/, `unexpected project RPC call: ${hit}`);
+    assert.match(hit, /\{ p_project: [\w.]+ \}/, `the project RPC must carry only the project id: ${hit}`);
+  }
+  // The failed counter (0014): same module, the project id and +1 / -1 only.
+  const failed = offendingLines([...DASH_SOURCES, ...EXT_SOURCES], /record_project_upload_failure/);
+  assert.ok(failed.length > 0, "the upload counter must record failures");
+  for (const hit of failed) {
+    assert.match(hit, /^apps\/extension\/src\/lib\/uploadCounter\.ts:/, `unexpected failure RPC call: ${hit}`);
+    assert.match(hit, /\{ p_project: [\w.]+, p_delta: -?1 \}/, `the failure RPC must carry only the project id and 1 or -1: ${hit}`);
+  }
+});
+
 // ── 4. Both Supabase clients run through the privacy guard ──────────────────
 
 test("every Supabase client is constructed with the guarded fetch", () => {
@@ -191,7 +215,6 @@ test("only small settings are written to localStorage", () => {
   assert.deepEqual(writers, [
     "apps/dashboard/lib/aiSettings.ts",   // Gemini key / model / prompt
     "apps/dashboard/lib/batchConfig.ts",  // custom colour swatches
-    "apps/dashboard/lib/bridge.ts",       // the extension id
     "apps/dashboard/lib/colorMode.ts",    // colour-mode preference
     "apps/dashboard/lib/theme.ts",        // light/dark preference
   ]);
@@ -219,6 +242,14 @@ test("the extension asks for no credential, cookie or browsing-history access", 
     assert.ok(!manifest.permissions.includes(p), `manifest requests "${p}"`);
   }
   assert.deepEqual(manifest.permissions.sort(), [
+    // Sales notifier (services/salesMonitor.ts): its 1-minute watchdog, the
+    // desktop notification for a sale, and the offscreen document that reads
+    // the TeePublic sales page and plays the chime. All local.
+    "alarms",
+    // No "debugger": Gemini browser jobs are off in the store package (packages/
+    // shared/src/features.ts); build.mjs adds it back only when they're on.
+    "notifications",
+    "offscreen",
     "scripting",
     "sidePanel",
     "storage",
@@ -227,12 +258,18 @@ test("the extension asks for no credential, cookie or browsing-history access", 
   ]);
 });
 
-test("the extension's host access is limited to its own site, Supabase and TeePublic", () => {
+test("the extension's host access is limited to its site, TeePublic and Canva exports", () => {
   const manifest = JSON.parse(read(path.join(EXT, "manifest.json")));
-  // The checked-in manifest is the PRODUCTION one; build.mjs narrows the
-  // Supabase wildcard to the one project and adds localhost only under --watch.
+  // The checked-in manifest is the PRODUCTION one; build.mjs adds localhost only
+  // under --watch. Supabase needs no host permission (it allows CORS from any
+  // origin), and listing it would print the project URL on the store page.
+  // Gemini: the page the jobs drive, and the one image host its generated
+  // images are served from (read back by services/geminiJobs.ts when the page's
+  // CORS refuses the content script). Exact hosts, no wildcard.
+  // Gemini's two hosts are absent: Gemini browser jobs are off in the store
+  // package (packages/shared/src/features.ts); build.mjs adds them when on.
   assert.deepEqual(manifest.host_permissions.sort(), [
-    "https://*.supabase.co/*",
+    "https://export-download.canva.com/*",
     "https://www.higgstee.com/*",
     "https://www.teepublic.com/*",
   ]);
@@ -242,10 +279,19 @@ test("the extension's host access is limited to its own site, Supabase and TeePu
 
   // No wildcard subdomain: teepublic.com 301s to www, every page the content
   // script drives is on www, and "*.teepublic.com" is what makes the Chrome Web
-  // Store flag the package for in-depth review.
-  for (const cs of manifest.content_scripts) {
-    assert.deepEqual(cs.matches, ["https://www.teepublic.com/*"]);
-  }
+  // Store flag the package for in-depth review. Each content script runs on
+  // exactly one site.
+  assert.deepEqual(
+    manifest.content_scripts.map((cs: { matches: string[]; js: string[] }) => [cs.matches, cs.js]),
+    [
+      [["https://www.teepublic.com/*"], ["content/teepublic.js"]],
+    ],
+  );
+  // No script in a page's own JS world (the Gemini file-picker hook is off).
+  assert.deepEqual(
+    manifest.content_scripts.filter((cs: { world?: string }) => cs.world === "MAIN").map((cs: { js: string[] }) => cs.js),
+    [],
+  );
 });
 
 test("the production manifest carries no development origin", () => {
@@ -303,12 +349,35 @@ test("the remote design-image fallback is gone from the tree", () => {
   assert.deepEqual(offendingLines([...DASH_SOURCES, ...EXT_SOURCES], /fetchAsDataUrl/), []);
 });
 
-test("the extension makes exactly one network call, and it is the guarded Supabase fetch", () => {
-  // Anything the extension fetches, it fetches through the privacy-guarded
-  // wrapper. A second `fetch(` in this tree is by definition a new egress path
-  // and has to be justified here before it can ship.
+test("extension fetches are limited to guarded Supabase, explicit Canva imports, Gemini results, the sales page and public listings", () => {
+  // Canva is a user-requested inbound artwork transfer. Its helper validates
+  // the exact Canva export host, omits credentials and refuses redirects.
+  // Gemini: the image Gemini just generated, read back from Google into the
+  // extension (content script first, service worker when CORS refuses; the
+  // worker only accepts lh3.googleusercontent.com). Inbound only.
+  // Sales notifier: a GET of the user's own TeePublic sales page (offscreen
+  // document), read into local storage. Inbound only.
+  // Listing exporter: GETs of public TeePublic design pages, same origin as the
+  // store page it runs on, parsed in the tab and never stored. Inbound only.
+  // Design images: GETs of public www.teepublic.com/t-shirt/<id> pages for the
+  // earnings tables' pictures (og:image), no credentials. Inbound only.
+  // Queue images still never trigger a remote fetch as a missing-file fallback.
   const calls = offendingLines(EXT_SOURCES, /(^|[^.\w])fetch\(/);
-  assert.deepEqual(calls.map((l) => l.split(":")[0]), ["apps/extension/src/lib/supabaseClient.ts"]);
+  assert.deepEqual(calls.map((l) => l.split(":")[0]).sort(), [
+    "apps/extension/src/content/gemini.ts",
+    "apps/extension/src/content/listingExport.ts",
+    "apps/extension/src/lib/supabaseClient.ts",
+    "apps/extension/src/offscreen/main.ts",
+    "apps/extension/src/services/canvaImport.ts",
+    "apps/extension/src/services/designImages.ts",
+    "apps/extension/src/services/geminiJobs.ts",
+  ]);
+  for (const file of ["src/content/gemini.ts", "src/content/listingExport.ts", "src/services/designImages.ts", "src/services/geminiJobs.ts", "src/offscreen/main.ts"]) {
+    const fetchLines = read(path.join(EXT, file)).split("\n").filter((l) => /(^|[^.\w])fetch\(/.test(l));
+    for (const line of fetchLines) {
+      assert.doesNotMatch(line, /body|method|POST|PUT/i, `${file} sends data with fetch: ${line.trim()}`);
+    }
+  }
 });
 
 test("no code fetches an item's imageUrl", () => {

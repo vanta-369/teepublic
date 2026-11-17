@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TeePublic Sales</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <img class="brand-logo" src="../icons/sales-128.png" width="52" height="52" alt="" />
+    <div>
+      <h1>TeePublic Sales</h1>
+      <small>Your next sale, heard. · <span id="project">…</span></small>
+    </div>
+  </header>
+
+  <label class="monitor-switch">
+    <span><b>Sales monitor</b><small id="monitor-note">Checks your TeePublic sales page every 2 minutes.</small></span>
+    <input id="enabled" type="checkbox" role="switch" />
+  </label>
+
+  <div class="cards">
+    <section><span>Next Payment</span><small id="payment-period">Earnings</small><strong id="payment">—</strong></section>
+    <section><span>This Month</span><small id="month-period">Earnings</small><strong id="month">—</strong></section>
+    <section><span>Total Earned</span><small>Lifetime</small><strong id="earned">—</strong></section>
+    <section><span>Items Sold</span><small>Lifetime</small><strong id="sold">—</strong></section>
+  </div>
+
+  <h2 class="daily-title">Daily sales <small id="daily-total"></small></h2>
+  <div id="daily-chart" class="daily-chart" aria-label="Sales in the last 14 days"></div>
+  <div class="daily-axis"><span id="daily-from"></span><span>today</span></div>
+  <div id="daily-list" class="daily-list"></div>
+
+  <p id="status" role="status">Loading…</p>
+  <small id="checked"></small>
+
+  <div class="settings">
+    <label><input id="sound" type="checkbox" /> Sale sound</label>
+  </div>
+
+  <div class="volume-control">
+    <label for="volume">Notification volume <output id="volume-value" for="volume">100%</output></label>
+    <input id="volume" type="range" min="0" max="100" step="1" value="100" />
+  </div>
+
+  <form id="interval-form" class="interval-control">
+    <label for="interval">Check every (seconds, at least 60)</label>
+    <div><input id="interval" type="number" min="60" max="86400" step="1" value="120" required /><button type="submit">Save</button></div>
+    <small id="interval-status" role="status">Applies after Save.</small>
+  </form>
+
+  <nav>
+    <button id="check">Check now</button>
+    <button id="test">Test sound</button>
+    <a href="https://www.teepublic.com/account/sales" target="_blank" rel="noopener noreferrer">Open TeePublic ↗</a>
+  </nav>
+
+  <h2>Activity <small>Latest 1,000 changes</small></h2>
+  <p class="hint">Time shown is when a change was detected - TeePublic can take up to 48h to update earnings. Royalty-only updates and corrections appear here too.</p>
+  <div id="history"></div>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>

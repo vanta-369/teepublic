@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Higgstee — POD Listing Uploader",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Create and submit your print-on-demand product listings to supported marketplaces from your Higgstee account.",
   "icons": {
     "16": "icons/icon-16.png",
@@ -30,11 +30,14 @@
     "unlimitedStorage",
     "tabs",
     "scripting",
-    "sidePanel"
+    "sidePanel",
+    "alarms",
+    "notifications",
+    "offscreen"
   ],
   "host_permissions": [
+    "https://export-download.canva.com/*",
     "https://www.higgstee.com/*",
-    "https://*.supabase.co/*",
     "https://www.teepublic.com/*"
   ],
   "externally_connectable": {

@@ -83,7 +83,7 @@ function readColors(row: Record<string, unknown>): Record<string, string> {
   return colors;
 }
 
-function metadataFromRow(
+export function metadataFromRow(
   raw: Record<string, unknown>,
   productColors: Record<string, string>,
   enabledProducts: string[]

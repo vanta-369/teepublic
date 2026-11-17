@@ -5,10 +5,16 @@
 import type {
   DashboardToExtensionMessage,
   ExtensionToDashboardResponse,
+  GeminiAccount,
+  GeminiJobType,
+  GeminiStateData,
   QueueBatch,
   QueueItem,
   QueueStateData,
+  UploadDay,
+  UploadQuota,
 } from "@teepublic/shared";
+import { EXTENSION_ID } from "./nav";
 
 // Minimal shape of the chrome.runtime API we use. Declared locally (not as a
 // global Window augmentation) to avoid colliding with @types/chrome, which is
@@ -27,24 +33,22 @@ function chromeRuntime(): ChromeRuntime | undefined {
   return (window as unknown as { chrome?: { runtime?: ChromeRuntime } }).chrome?.runtime;
 }
 
-const STORAGE_KEY = "teepublic.extensionId";
-
-export function getExtensionId(): string | null {
-  if (typeof window === "undefined") return null;
-  return window.localStorage.getItem(STORAGE_KEY);
-}
-
-export function setExtensionId(id: string) {
-  window.localStorage.setItem(STORAGE_KEY, id.trim());
-}
-
-export function clearExtensionId() {
-  window.localStorage.removeItem(STORAGE_KEY);
+// The dashboard talks ONLY to the published Chrome Web Store extension. There is
+// no per-browser override any more: an ID saved by an older version
+// ("teepublic.extensionId" in localStorage) is ignored.
+export function getExtensionId(): string {
+  return EXTENSION_ID;
 }
 
 export function isExtensionAvailable(): boolean {
   return !!chromeRuntime()?.sendMessage;
 }
+
+const NOT_INSTALLED =
+  "The Higgstee extension isn't installed or enabled in this Chrome. Add it from the Chrome Web Store (Extension page → Add to Chrome), then try again.";
+
+const SIGNED_OUT =
+  "The extension isn't signed in. Click the Higgstee icon in Chrome's toolbar, sign in in the side panel with your Higgstee email and password, then try again.";
 
 export function sendToExtension(
   message: DashboardToExtensionMessage,
@@ -52,15 +56,26 @@ export function sendToExtension(
 ): Promise<ExtensionToDashboardResponse> {
   return new Promise((resolve, reject) => {
     const id = extensionId ?? getExtensionId();
-    if (!id) return reject(new Error("Extension ID not configured"));
     const runtime = chromeRuntime();
-    if (!runtime?.sendMessage) return reject(new Error("chrome.runtime is unavailable — open this page in Chrome and install the extension"));
+    // chrome.runtime.sendMessage only exists on this page when an installed
+    // extension lists the site in externally_connectable - i.e. ours.
+    if (!runtime?.sendMessage) return reject(new Error(NOT_INSTALLED));
 
     try {
       runtime.sendMessage(id, message, (response) => {
         const err = runtime.lastError;
-        if (err) return reject(new Error(err.message));
-        if (!response) return reject(new Error("no response from extension (is it installed and the ID correct?)"));
+        if (err) {
+          return reject(new Error(
+            /receiving end does not exist|could not establish connection/i.test(err.message ?? "")
+              ? NOT_INSTALLED
+              : err.message,
+          ));
+        }
+        if (!response) return reject(new Error(NOT_INSTALLED));
+        // The extension keeps its own session, separate from this page's.
+        if (!response.ok && response.error === "access denied: signed_out") {
+          return resolve({ ...response, error: SIGNED_OUT });
+        }
         resolve(response);
       });
     } catch (e) {
@@ -141,6 +156,67 @@ export const clearQueue     = (id?: string) => control({ type: "QUEUE_CLEAR" }, 
 export const retryQueueItem = (itemId: string, id?: string) => control({ type: "ITEM_RETRY", itemId }, id);
 export const toggleQueueItem = (itemId: string, id?: string) => control({ type: "QUEUE_ITEM_TOGGLE", itemId }, id);
 export const selectAllQueueItems = (value: boolean, id?: string) => control({ type: "QUEUE_SELECT_ALL", value }, id);
+
+/* ── Daily upload quota ─────────────────────────────────────────────────────
+ * Per project, counted in the extension (each upload attempt in the last 24h).
+ */
+export const fetchQuotas = (projectIds: string[], id?: string) =>
+  request<Record<string, UploadQuota>>({ type: "QUOTA_GET", projectIds }, id).then((q) => q ?? {});
+export const setQuotaLimit = (projectId: string, limit: number, id?: string) =>
+  request<Record<string, UploadQuota>>({ type: "QUOTA_SET_LIMIT", projectId, limit }, id);
+export const fetchHistory = (projectIds: string[], id?: string) =>
+  request<Record<string, Record<string, UploadDay>>>({ type: "HISTORY_GET", projectIds }, id).then((h) => h ?? {});
+export const setQuotaUsed = (projectId: string, used: number, id?: string) =>
+  request<Record<string, UploadQuota>>({ type: "QUOTA_SET_USED", projectId, used }, id);
+
+/* ── Earnings tables ────────────────────────────────────────────────────────
+ * A picture per TeePublic design id. The extension reads each design's public
+ * page on teepublic.com (cached there); "" = no picture. At most ~60 new ids
+ * are looked up per call, so callers ask again for what's still missing.
+ */
+export const fetchDesignImages = (designIds: string[], id?: string) =>
+  request<Record<string, string>>({ type: "DESIGN_IMAGES", designIds }, id).then((m) => m ?? {});
+
+/* ── Gemini ─────────────────────────────────────────────────────────────────
+ * Jobs run in the extension, on gemini.google.com, in Google accounts the user
+ * signed into in this browser. Same model as the upload queue: the extension
+ * owns the jobs, the dashboard sends them and polls their state. The design
+ * goes from this page to the local extension to Google - never to a Higgstee
+ * server.
+ */
+
+async function request<T>(message: DashboardToExtensionMessage, extensionId?: string): Promise<T> {
+  const res = await sendToExtension(message, extensionId);
+  if (!res.ok) throw new Error(res.error);
+  return res.data as T;
+}
+
+/** Stored accounts, or with `refresh` a fresh scan of the browser's Google sign-ins. */
+export const listGeminiAccounts = (refresh = false, id?: string) =>
+  request<GeminiAccount[]>({ type: "LIST_ACCOUNTS", refresh }, id).then((a) => a ?? []);
+export const addGeminiAccount = (id?: string) => control({ type: "ADD_ACCOUNT" }, id);
+export const setGeminiAccountLabel = (index: number, label: string, id?: string) =>
+  request<GeminiAccount[]>({ type: "SET_ACCOUNT_LABEL", index, label }, id);
+
+export interface GeminiJobRequest {
+  jobId: string;
+  accountIndex: number;
+  jobType: GeminiJobType;
+  prompt: string;
+  /** Raw base64, no data: prefix. */
+  imageBase64?: string;
+  imageMime?: string;
+}
+
+export const runGeminiJob = (job: GeminiJobRequest, id?: string) => control({ type: "RUN_GEMINI_JOB", ...job }, id);
+export const fetchGeminiState = (id?: string) =>
+  request<GeminiStateData>({ type: "GEMINI_STATE" }, id).then((s) => s ?? { accounts: [], jobs: [] });
+/** A job's generated image and the design it was sent with (data URLs, or null). */
+export const fetchGeminiJobImages = (jobId: string, id?: string) =>
+  request<{ imageDataUrl: string | null; inputImageDataUrl: string | null }>({ type: "GEMINI_RESULT", jobId }, id)
+    .then((r) => ({ imageDataUrl: r?.imageDataUrl ?? null, inputImageDataUrl: r?.inputImageDataUrl ?? null }));
+export const retryGeminiJob = (jobId: string, id?: string) => control({ type: "GEMINI_JOB_RETRY", jobId }, id);
+export const removeGeminiJob = (jobId: string, id?: string) => control({ type: "GEMINI_JOB_REMOVE", jobId }, id);
 
 /* Queue thumbnails used to be mirrored into localStorage here so the Uploads
  * page could paint tiles for a batch it had just sent. They are gone: the

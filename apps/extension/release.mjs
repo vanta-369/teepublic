@@ -56,6 +56,10 @@ function fail(message) {
 }
 
 // ── 1. Always package a freshly built dist ──────────────────────────────────
+// From an EMPTY dist: neither build mode deletes anything, so files from a dev
+// build would otherwise ride along - .map files (which abort the release) and
+// entries that are no longer built (e.g. the Gemini scripts while that switch is off).
+await fs.rm(DIST, { recursive: true, force: true });
 console.log("[release] building…");
 const built = spawnSync(process.execPath, [path.join(__dirname, "build.mjs")], {
   stdio: "inherit",

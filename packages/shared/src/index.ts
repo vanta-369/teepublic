@@ -6,3 +6,6 @@ export * from "./teepublicCatalog";
 export * from "./colorMatch";
 export * from "./privacy";
 export * from "./uploadCount";
+export * from "./canva";
+export * from "./gemini";
+export * from "./features";

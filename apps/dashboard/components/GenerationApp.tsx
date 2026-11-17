@@ -3,9 +3,9 @@
 import { useEffect, useRef, useState } from "react";
 import { nanoid } from "nanoid";
 import type { DesignMetadata, QueueBatch, QueueItem } from "@teepublic/shared";
-import { SLUG_TO_PRODUCT_LABEL } from "@teepublic/shared";
+import { GEMINI_BROWSER_JOBS, SLUG_TO_PRODUCT_LABEL } from "@teepublic/shared";
 import { Dropzone } from "./Dropzone";
-import { sendQueueToExtension, getExtensionId } from "@/lib/bridge";
+import { sendQueueToExtension, getExtensionId, isExtensionAvailable, listGeminiAccounts } from "@/lib/bridge";
 import { fileToBase64, generateListing, GEMINI_MODELS, DEFAULT_GEMINI_MODEL, type GeneratedListing } from "@/lib/gemini";
 import {
   loadDesigns,
@@ -18,7 +18,12 @@ import {
 } from "@/lib/designsStore";
 import { blobToBase64 } from "@/lib/localDb";
 import { expandDroppedFiles } from "@/lib/zip";
-import { getGeminiKey, setGeminiKey, getGeminiModel, setGeminiModel, getGeminiPrompt, setGeminiPrompt } from "@/lib/aiSettings";
+import {
+  getGeminiKey, setGeminiKey, getGeminiModel, setGeminiModel, getGeminiPrompt, setGeminiPrompt,
+  getGeminiSource, setGeminiSource, getGeminiAccountIndex, setGeminiAccountIndex, type GeminiSource,
+} from "@/lib/aiSettings";
+import { generateListingViaAccount } from "@/lib/geminiAccount";
+import type { GeminiAccount } from "@teepublic/shared";
 import { assertCanGenerate, logGeneration, GenerationBlockedError } from "@/lib/access.client";
 import type { ColorProductConfigValue } from "./ColorProductConfig";
 import { allEnabledProducts, applyPreset, type ColorPreset } from "@/lib/colorPresets";
@@ -84,6 +89,11 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
   const [keyDraft, setKeyDraft] = useState("");
   const [showKey, setShowKey]   = useState(false);
   const [model, setModel]       = useState<string>(DEFAULT_GEMINI_MODEL);
+  // "account" = a Google account connected in the extension; "apiKey" = the key above.
+  // With GEMINI_BROWSER_JOBS off (this release) only "apiKey" exists.
+  const [source, setSourceState] = useState<GeminiSource>(GEMINI_BROWSER_JOBS ? "account" : "apiKey");
+  const [accounts, setAccounts] = useState<GeminiAccount[] | null>(null);
+  const [accountIndex, setAccountIndexState] = useState<number | null>(null);
 
   const [images, setImages] = useState<StagedImage[]>([]);
   // `prompt` is the live draft (what's in the textarea). `savedPrompt`
@@ -116,7 +126,42 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
     const sp = getGeminiPrompt();
     setSavedPrompt(sp);
     setPrompt(sp);
+    if (!GEMINI_BROWSER_JOBS) { setSourceState("apiKey"); setAccounts([]); return; }
+    setSourceState(getGeminiSource());
+    const savedIndex = getGeminiAccountIndex();
+    // The accounts the extension already knows - no scan, that happens on the
+    // Connect account page.
+    if (!isExtensionAvailable() || !getExtensionId()) { setAccounts([]); return; }
+    listGeminiAccounts(false)
+      .then((list) => {
+        setAccounts(list);
+        const pick = list.find((a) => a.index === savedIndex) ?? list[0];
+        setAccountIndexState(pick ? pick.index : null);
+      })
+      .catch(() => setAccounts([]));
   }, []);
+
+  function chooseSource(next: GeminiSource) {
+    setSourceState(next);
+    setGeminiSource(next);
+  }
+  function chooseAccount(index: number) {
+    setAccountIndexState(index);
+    setGeminiAccountIndex(index);
+  }
+
+  const sourceReady = source === "account" ? accountIndex !== null : !!apiKey;
+  const sourceMissing = source === "account"
+    ? "Connect a Google account first (Connect account in the sidebar)."
+    : "Save your Gemini API key first.";
+
+  /** One listing from whichever source is selected. */
+  function generateOne(base64: string, mime: string, signal?: AbortSignal): Promise<GeneratedListing> {
+    if (source === "account" && accountIndex !== null) {
+      return generateListingViaAccount({ accountIndex, prompt, imageBase64: base64, imageMime: mime, signal });
+    }
+    return generateListing({ apiKey, prompt, imageBase64: base64, imageMime: mime, model, signal });
+  }
 
   function savePrompt() {
     const next = prompt.trim();
@@ -273,7 +318,7 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
 
   async function generateAll() {
     setError(null);
-    if (!apiKey) { setError("Save your Gemini API key first."); return; }
+    if (!sourceReady) { setError(sourceMissing); return; }
     if (images.length === 0) { setError("Add at least one design image."); return; }
     if (!prompt.trim()) { setError("Add a prompt describing the theme."); return; }
 
@@ -304,14 +349,7 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
         // suspend mid-batch; catch it at the next item, never from a cache.
         await assertCanGenerate();
         const base64 = await ensureBase64(img);
-        const listing = await generateListing({
-          apiKey,
-          prompt,
-          imageBase64: base64,
-          imageMime: img.mime,
-          model,
-          signal: ac.signal,
-        });
+        const listing = await generateOne(base64, img.mime, ac.signal);
         void logGeneration("success", { model });
         setDesigns((prev) => prev.map((d) =>
           d.image.id === img.id ? { ...d, listing, status: "ready" } : d
@@ -387,8 +425,9 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
   async function retryDesign(id: string) {
     const target = designs.find((d) => d.image.id === id);
     if (!target) return;
-    if (!apiKey || !prompt.trim()) {
-      setError("Need a saved API key and a prompt to retry.");
+    if (!sourceReady) { setError(sourceMissing); return; }
+    if (!prompt.trim()) {
+      setError("Need a prompt to retry.");
       return;
     }
     setError(null);
@@ -408,13 +447,7 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
     ));
     try {
       const base64 = await ensureBase64(target.image);
-      const listing = await generateListing({
-        apiKey,
-        prompt,
-        imageBase64: base64,
-        imageMime: target.image.mime,
-        model,
-      });
+      const listing = await generateOne(base64, target.image.mime);
       void logGeneration("success", { model });
       setDesigns((prev) => prev.map((d) =>
         d.image.id === id ? { ...d, listing, status: "ready" } : d
@@ -504,7 +537,52 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
 
   return (
     <div className="space-y-6">
+      {/* Source: a connected Google account, or the user's own API key.
+          Only the API key while GEMINI_BROWSER_JOBS is off - no picker then. */}
+      {GEMINI_BROWSER_JOBS && <div className="surface px-2 py-2 inline-flex items-center gap-1">
+        {([["account", "Google account"], ["apiKey", "API key"]] as const).map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            onClick={() => chooseSource(value)}
+            className={`tab ${source === value ? "tab-active" : ""}`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>}
+
+      {GEMINI_BROWSER_JOBS && source === "account" && (
+        <section className="surface p-5 space-y-3">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <h3 className="text-sm font-semibold">Google account</h3>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                Listings are written by Gemini with your connected Google account. No API key needed.
+              </p>
+            </div>
+            {accountIndex !== null ? <span className="chip-ok">Connected</span> : <span className="chip-warn">Not connected</span>}
+          </div>
+          {accounts === null ? (
+            <p className="text-xs text-zinc-500">Loading accounts…</p>
+          ) : accounts.length === 0 ? (
+            <a href="/dashboard/gemini" className="btn-primary inline-flex">Connect account</a>
+          ) : (
+            <select
+              className="input max-w-sm"
+              value={accountIndex ?? ""}
+              onChange={(e) => chooseAccount(Number(e.target.value))}
+            >
+              {accounts.map((a) => (
+                <option key={a.index} value={a.index}>{a.label || a.email}</option>
+              ))}
+            </select>
+          )}
+        </section>
+      )}
+
       {/* Gemini API key */}
+      {source === "apiKey" && (
       <section className="surface p-5 space-y-3">
         <div className="flex items-center justify-between gap-4">
           <div>
@@ -561,10 +639,12 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
           </span>
         </div>
       </section>
+      )}
 
       {/* Images */}
       <Dropzone
         title="Design images"
+        canvaImport
         hint="Drop .png/.jpg files or a .zip folder of designs. Each image becomes one TeePublic listing."
         accept="image/png,image/jpeg,image/webp,.zip,application/zip"
         multiple
@@ -622,14 +702,14 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
               type="button"
               className="btn-primary"
               onClick={generateAll}
-              disabled={images.length === 0 || !apiKey || !prompt.trim()}
+              disabled={images.length === 0 || !sourceReady || !prompt.trim()}
             >
               {readyCount > 0 ? "Re-generate all" : `Generate ${images.length || ""} listings`}
             </button>
           )}
           <span className="text-xs text-zinc-500 dark:text-zinc-400">
             {busy
-              ? "Calling Gemini per image…"
+              ? source === "account" ? "Writing listings with your Google account…" : "Calling Gemini per image…"
               : readyCount > 0
                 ? `${readyCount} of ${designs.length} ready`
                 : "Ready when you are."}
@@ -1055,9 +1135,11 @@ function PlaceholderTab({
       <div className="surface-soft p-6 text-center space-y-3">
         <p className="text-sm text-danger-600 dark:text-danger-500">{error ?? "Generation failed."}</p>
         <button type="button" className="btn-primary text-sm" onClick={onRetry}>Retry this design</button>
-        <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
-          Tip: change the model in the API key panel first if you hit a quota error.
-        </p>
+        {/quota/i.test(error ?? "") && (
+          <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+            Tip: change the model in the API key panel first if you hit a quota error.
+          </p>
+        )}
       </div>
     );
   }

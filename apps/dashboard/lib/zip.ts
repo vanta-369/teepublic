@@ -5,7 +5,7 @@
 import { unzipSync } from "fflate";
 
 const IMAGE_EXT = /\.(png|jpe?g|webp)$/i;
-const SHEET_EXT = /\.(xlsx|csv)$/i;
+const SHEET_EXT = /\.(xlsx|xls|csv)$/i;
 
 function mimeFor(name: string): string {
   const n = name.toLowerCase();

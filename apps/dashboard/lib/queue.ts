@@ -2,6 +2,7 @@ import { nanoid } from "nanoid";
 import type { QueueBatch, QueueItem } from "@teepublic/shared";
 import type { ParsedRow } from "./parser";
 import { stemName } from "./parser";
+import { resolvePerProductColors } from "./colorPresets";
 
 export interface MatchedImage {
   stem: string;              // lowercased, extension-stripped key
@@ -26,7 +27,14 @@ export function buildQueue(
       if (!img) return null;
       return {
         id: nanoid(10),
-        metadata: { ...row.metadata, filename: img.originalName },
+        // Every colour is put through the product's own catalog, so a colour a
+        // product doesn't sell (e.g. saved before the catalog was corrected)
+        // goes out as that product's closest real colour.
+        metadata: {
+          ...row.metadata,
+          filename: img.originalName,
+          productColors: resolvePerProductColors(row.metadata.productColors ?? {}),
+        },
         // Filled in only at send time, one design at a time, from local
         // storage - see sendQueueToExtension's resolver. Keeping it empty here
         // means a 200-design batch never holds 200 images in memory at once.

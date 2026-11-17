@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { createPortal } from "react-dom";
 import { ImageOff } from "lucide-react";
 
 import { DesignTitleLink } from "@/components/design-title-link";
@@ -170,16 +171,70 @@ export function DesignThumb({
   }
 
   return (
-    // Plain <img>: these are Supabase Storage URLs on a host that isn't in
-    // next.config's image domains, and next/image would need one entry per
-    // project ref.
-    // eslint-disable-next-line @next/next/no-img-element
-    <img
-      src={src}
-      alt={alt}
-      loading="lazy"
-      onError={() => setFailed(true)}
-      className="h-10 w-10 shrink-0 rounded-lg bg-ink-800 object-cover"
-    />
+    <ZoomOnHover src={src} alt={alt}>
+      {/* Plain <img>: either an object URL over this browser's IndexedDB, or
+          TeePublic's own CDN picture (images.teepublic.com) found by the
+          extension - neither belongs in next/image's optimiser. */}
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={src}
+        alt={alt}
+        loading="lazy"
+        onError={() => setFailed(true)}
+        className="h-10 w-10 shrink-0 cursor-zoom-in rounded-lg bg-ink-800 object-cover"
+      />
+    </ZoomOnHover>
+  );
+}
+
+/** TeePublic's CDN serves s_313 and s_630 (larger sizes 404): zoom uses the sharp one. */
+const largeImage = (src: string) =>
+  src.startsWith("https://images.teepublic.com/") ? src.replace(/([,:])s_\d+(?=[,.])/, "$1s_630") : src;
+
+const ZOOM = 360;
+
+/** A big, clear copy of the thumbnail while the mouse is over it - beside the
+ *  thumbnail, kept inside the window, drawn over everything (dialogs too). */
+function ZoomOnHover({ src, alt, children }: { src: string; alt: string; children: React.ReactNode }) {
+  const ref = React.useRef<HTMLSpanElement>(null);
+  const [pos, setPos] = React.useState<{ left: number; top: number; size: number } | null>(null);
+  const [big, setBig] = React.useState(src);
+
+  const show = () => {
+    const r = ref.current?.getBoundingClientRect();
+    if (!r) return;
+    const size = Math.min(ZOOM, window.innerWidth - 32, window.innerHeight - 32);
+    const right = r.right + 12;
+    const left = right + size <= window.innerWidth - 16 ? right : Math.max(16, r.left - 12 - size);
+    const top = Math.min(Math.max(16, r.top + r.height / 2 - size / 2), window.innerHeight - size - 16);
+    setBig(src); // the small one is cached - it shows at once, then the sharp one replaces it
+    const img = new Image();
+    img.onload = () => setBig(img.src);
+    img.src = largeImage(src);
+    setPos({ left, top, size });
+  };
+
+  React.useEffect(() => {
+    if (!pos) return;
+    const hide = () => setPos(null);
+    window.addEventListener("scroll", hide, true);
+    return () => window.removeEventListener("scroll", hide, true);
+  }, [pos]);
+
+  return (
+    <span ref={ref} className="shrink-0" onMouseEnter={show} onMouseLeave={() => setPos(null)}>
+      {children}
+      {pos &&
+        createPortal(
+          <div
+            className="pointer-events-none fixed z-[1000] overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-2xl dark:border-white/10"
+            style={{ left: pos.left, top: pos.top, width: pos.size, height: pos.size }}
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={big} alt={alt} className="h-full w-full object-contain" />
+          </div>,
+          document.body,
+        )}
+    </span>
   );
 }

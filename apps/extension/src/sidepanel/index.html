@@ -10,6 +10,11 @@
 
   <!-- ══ Screen 1: Login (signed out) ══════════════════════════════════════ -->
   <main id="view-login" class="login">
+    <!-- Sales work without a Higgstee account: having the extension is enough. -->
+    <button id="login-sales" class="sales-icon login-sales" title="TeePublic sales" aria-label="TeePublic sales">
+      <img src="../icons/sales-48.png" alt="" />
+      <span class="sales-count" data-zero="1">0</span>
+    </button>
     <div class="login-card">
       <img class="login-logo" src="../icons/icon-128.png" alt="HiggsTee" />
       <h1 class="login-title">HiggsTee</h1>
@@ -42,11 +47,11 @@
     <!-- Header (pinned) -->
     <header class="app-header">
       <div class="brand">
-        <img class="brand-logo" src="../icons/icon-128.png" alt="HiggsTee" />
-        <div class="brand-text">
-          <span class="brand-name">HiggsTee</span>
-          <span class="brand-sub">TeePublic Uploader</span>
-        </div>
+        <img class="brand-logo" src="../icons/icon-128.png" alt="HiggsTee" title="HiggsTee - TeePublic Uploader" />
+        <button id="sales-toggle" class="sales-icon" title="TeePublic sales" aria-label="TeePublic sales" aria-expanded="false" aria-controls="sales-pop">
+          <img src="../icons/sales-48.png" alt="" />
+          <span class="sales-count" data-zero="1">0</span>
+        </button>
       </div>
       <div class="header-actions">
         <button id="btn-theme" class="icon-btn" title="Toggle theme" aria-label="Toggle theme">
@@ -79,6 +84,37 @@
 
     <!-- Scrollable body -->
     <div class="app-scroll">
+      <!-- Project: chosen first; the designs show only after. -->
+      <section id="project-gate" class="project-gate" hidden>
+        <h2 class="project-gate-title">Choose a project</h2>
+        <p class="project-gate-sub">The TeePublic account this Chrome profile uploads to. Your designs show after.</p>
+        <div id="project-list" class="project-list"></div>
+        <p id="project-error" class="form-error" role="alert"></p>
+      </section>
+
+      <div id="project-bar" class="project-bar" hidden>
+        <div class="project-bar-row">
+          <span class="project-bar-label">Project</span>
+          <span id="project-name" class="project-bar-name">…</span>
+          <button id="project-change" class="btn btn-ghost">Change</button>
+        </div>
+        <!-- This project's free upload slots in TeePublic's rolling 24h limit. -->
+        <div id="slots" class="slots">
+          <div class="slots-head">
+            <span id="slots-free" class="slots-free">–</span>
+            <span id="slots-used" class="slots-used"></span>
+          </div>
+          <div class="slots-bar"><div id="slots-fill" class="slots-fill"></div></div>
+          <span id="slots-next" class="slots-next"></span>
+        </div>
+      </div>
+
+      <div id="project-mismatch" class="project-mismatch" hidden>
+        <p id="project-mismatch-text"></p>
+        <button id="project-switch" class="btn btn-primary btn-block">Switch</button>
+      </div>
+
+      <div id="queue-area">
       <!-- Toolbar -->
       <div class="toolbar">
         <div class="search">
@@ -127,6 +163,7 @@
           </div>
         </div>
       </div>
+      </div><!-- /queue-area -->
     </div>
 
     <!-- Action bar (pinned) -->
@@ -144,6 +181,15 @@
       </button>
       <button id="act-clear" class="btn btn-danger">Clear</button>
     </footer>
+  </div>
+
+  <!-- Sales dropdown: opened by the sales icon in the Project box. -->
+  <div id="sales-pop" class="sales-pop" hidden>
+    <div class="sales-pop-backdrop" data-close="1"></div>
+    <div class="sales-pop-card" role="dialog" aria-label="TeePublic sales">
+      <span class="sales-pop-arrow" aria-hidden="true"></span>
+      <iframe id="sales-frame" title="TeePublic sales"></iframe>
+    </div>
   </div>
 
   <script type="module" src="main.js"></script>

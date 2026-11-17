@@ -2,7 +2,7 @@
 // `node build.mjs` for one-shot, `node build.mjs --watch` for dev.
 
 import { build, context } from "esbuild";
-import { promises as fs } from "node:fs";
+import { promises as fs, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import chokidar from "chokidar";
@@ -10,15 +10,28 @@ import chokidar from "chokidar";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SRC = path.join(__dirname, "src");
 const DIST = path.join(__dirname, "dist");
-const STATIC_DIRS = ["popup", "queue", "sidepanel"]; // dirs w/ HTML/CSS/SVG to copy
+const STATIC_DIRS = ["popup", "queue", "sidepanel", "offscreen", "sales"]; // dirs w/ HTML/CSS/SVG to copy
 const watch = process.argv.includes("--watch");
+
+// GEMINI_BROWSER_JOBS (packages/shared/src/features.ts) - read from the source so
+// the dashboard, the worker and the package can never disagree. Off: the Gemini
+// content scripts aren't built and the manifest asks for none of their access.
+const GEMINI_BROWSER_JOBS = /GEMINI_BROWSER_JOBS\s*:\s*boolean\s*=\s*true\b/.test(
+  readFileSync(path.join(__dirname, "..", "..", "packages", "shared", "src", "features.ts"), "utf8"),
+);
 
 const entries = {
   "background/index":    path.join(SRC, "background/index.ts"),
   "content/teepublic":   path.join(SRC, "content/teepublic.ts"),
+  ...(GEMINI_BROWSER_JOBS ? {
+    "content/gemini":      path.join(SRC, "content/gemini.ts"),
+    "content/geminiMain":  path.join(SRC, "content/geminiMain.ts"),
+  } : {}),
   "popup/main":          path.join(SRC, "popup/main.ts"),
   "queue/main":          path.join(SRC, "queue/main.ts"),
   "sidepanel/main":      path.join(SRC, "sidepanel/main.ts"),
+  "offscreen/main":      path.join(SRC, "offscreen/main.ts"),
+  "sales/main":          path.join(SRC, "sales/main.ts"),
 };
 
 // ── Supabase connection details, baked in at build time ─────────────────────
@@ -153,13 +166,18 @@ const sharedOpts = {
 async function writeManifest() {
   const m = JSON.parse(await fs.readFile(path.join(__dirname, "manifest.json"), "utf8"));
 
-  // Narrow "https://*.supabase.co/*" (every Supabase tenant on the internet) to
-  // just this project. Least privilege, and one less thing for review to query.
-  const supabaseUrl = JSON.parse(define.__SUPABASE_URL__);
-  if (supabaseUrl) {
-    const origin = new URL(supabaseUrl).origin + "/*";
-    m.host_permissions = m.host_permissions.map((h) =>
-      h === "https://*.supabase.co/*" ? origin : h,
+  // No Supabase host permission: the project answers CORS with
+  // "Access-Control-Allow-Origin: *", so the side panel and service worker reach
+  // it without one - and the Web Store listing doesn't print the project URL.
+
+  // Gemini browser jobs: only when the switch is on. The checked-in manifest is
+  // the store package's, without them.
+  if (GEMINI_BROWSER_JOBS) {
+    m.permissions.push("debugger");
+    m.host_permissions.push("https://gemini.google.com/*", "https://lh3.googleusercontent.com/*");
+    m.content_scripts.push(
+      { matches: ["https://gemini.google.com/*"], js: ["content/gemini.js"], run_at: "document_idle" },
+      { matches: ["https://gemini.google.com/*"], js: ["content/geminiMain.js"], run_at: "document_start", world: "MAIN" },
     );
   }
 
@@ -184,7 +202,7 @@ async function copyStatic() {
     const to = path.join(DIST, dir);
     await fs.mkdir(to, { recursive: true });
     for (const entry of await fs.readdir(from)) {
-      if (/\.(html|css|svg|png)$/.test(entry)) {
+      if (/\.(html|css|svg|png|mp3)$/.test(entry)) {
         await fs.copyFile(path.join(from, entry), path.join(to, entry));
       }
     }
@@ -220,11 +238,24 @@ if (watch) {
   console.log("[extension] watching for changes");
   chokidar.watch([
     path.join(__dirname, "manifest.json"),
-    path.join(SRC, "**/*.{html,css,svg,png}"),
+    path.join(SRC, "**/*.{html,css,svg,png,mp3}"),
     path.join(SRC, "icons/**/*"),
   ]).on("change", async () => {
-    await copyStatic();
-    console.log("[extension] static assets refreshed");
+    // Windows can hold a file for a moment while an editor saves it (EBUSY):
+    // try again shortly instead of letting the watcher crash.
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await copyStatic();
+        console.log("[extension] static assets refreshed");
+        return;
+      } catch (e) {
+        if (attempt >= 5 || !["EBUSY", "EPERM", "ENOENT"].includes(e?.code)) {
+          console.warn("[extension] static copy failed:", e?.message ?? e);
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 150 * attempt));
+      }
+    }
   });
 } else {
   await build(sharedOpts);

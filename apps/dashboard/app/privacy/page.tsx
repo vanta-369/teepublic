@@ -156,6 +156,7 @@ export default function PrivacyPage() {
               "Your account and access status: whether your account is approved, when your trial started and ends, your plan and subscription state, and whether the account is active, pending, expired or suspended.",
               "Whether the account is an administrator, where that is needed to run the service.",
               "A single total: the number of listings you have successfully published. See section 4.",
+              "Your projects, if you use them: each project's name (a label you choose, such as \"Baseball\"), how many listings it has published, and how many uploads failed. See section 4.",
               "Basic account activity for security and support — for example sign-ins, approvals and plan changes, recorded with a timestamp.",
             ]}
           />
@@ -217,6 +218,12 @@ export default function PrivacyPage() {
             When an upload is confirmed successful, your account&apos;s total upload count goes
             up by one. That total is the only upload statistic we keep. The record consists of
             your user ID, the count, and when the count last changed.
+          </P>
+          <P>
+            If you sort your work into projects (for example one per marketplace account), we also
+            keep each project&apos;s name, how many listings were published under it and how many
+            uploads failed, so you can see every project&apos;s counts from any browser. A project holds nothing about the
+            designs themselves - none of the items listed below.
           </P>
           <P>We do not store, and do not receive:</P>
           <Bullets

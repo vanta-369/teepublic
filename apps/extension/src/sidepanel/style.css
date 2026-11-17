@@ -470,3 +470,78 @@ body[data-view="app"]   #view-app   { display: flex; }
   .stats { grid-template-columns: repeat(2, 1fr); }
   .account-name { display: none; }
 }
+
+/* ── Project step ─────────────────────────────────────────────────────────── */
+.project-gate { padding: 20px 12px 8px; }
+.project-gate-title { font-family: var(--font-display); font-size: var(--text-2xl); font-weight: 700; margin: 0 0 4px; }
+.project-gate-sub { color: var(--text-muted); font-size: var(--text-sm); margin: 0 0 14px; line-height: var(--leading-normal); }
+.project-list { display: flex; flex-direction: column; gap: 8px; }
+.project-pick {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;
+  padding: 12px 14px; border-radius: var(--radius-md); border: 1px solid var(--card-border);
+  background: var(--bg-elevated); color: var(--text); font: 600 var(--text-base) var(--font-body);
+  cursor: pointer; text-align: left;
+}
+.project-pick:hover { border-color: var(--border-accent); background: var(--bg-hover); }
+.project-pick span { color: var(--accent); font-size: var(--text-lg); }
+/* Same 12px side gutter as the toolbar / stats, so the box is never cut by the scrollbar. */
+.project-bar {
+  display: flex; flex-direction: column; gap: 10px; margin: 12px 12px 4px; padding: 10px 12px;
+  border-radius: var(--radius-md); background: var(--accent-dim); border: 1px solid var(--border-accent);
+}
+.project-bar-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.project-bar-label { font-size: var(--text-2xs); text-transform: uppercase; letter-spacing: .08em; color: var(--text-muted); }
+.project-bar-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; color: var(--accent); }
+.project-mismatch {
+  margin: 10px 12px; padding: 14px; border-radius: var(--radius-md); border: 1px solid var(--danger-border);
+  background: var(--danger-grad); font-size: var(--text-sm); line-height: var(--leading-normal);
+}
+.project-mismatch p { margin: 0 0 10px; }
+.project-gate[hidden], .project-bar[hidden], .project-mismatch[hidden], #queue-area[hidden] { display: none !important; }
+
+/* ── Upload slots (24h) ───────────────────────────────────────────────────── */
+.slots { padding-top: 10px; border-top: 1px solid var(--border-accent); }
+.slots[hidden] { display: none !important; }
+.slots-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.slots-free { font-weight: 700; font-size: var(--text-lg); color: var(--accent); }
+.slots[data-full="1"] .slots-free { color: #f87171; }
+.slots-used { font-size: var(--text-xs); color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.slots-bar { margin-top: 8px; height: 6px; border-radius: 999px; background: var(--bg-hover); overflow: hidden; }
+.slots-fill { height: 100%; border-radius: 999px; background: var(--accent); transition: width .3s; }
+.slots[data-full="1"] .slots-fill { background: #ef4444; }
+.slots-next { display: block; margin-top: 6px; font-size: var(--text-xs); color: var(--text-muted); }
+.slots-next:empty { display: none; }
+
+/* ── Sales ───────────────────────────────────────────────────────────────── */
+
+/* ── Sales icon + dropdown (the Sales screen floats over the panel) ─────── */
+.sales-icon {
+  position: relative; flex: none; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 8px;
+  background: none; cursor: pointer; transition: transform .12s ease, box-shadow .12s ease;
+}
+.sales-icon img { display: block; width: 32px; height: 32px; border-radius: 8px; }
+.sales-icon:hover { transform: translateY(-1px); box-shadow: 0 0 0 2px rgba(136, 239, 186, .55); }
+.sales-icon[aria-expanded="true"] { box-shadow: 0 0 0 2px #88efba; }
+.sales-count {
+  position: absolute; right: -5px; bottom: -4px; min-width: 16px; height: 15px; padding: 0 4px;
+  border-radius: 4px; background: #16804a; color: #fff; font: 700 10px/15px var(--font-body); text-align: center;
+  box-shadow: 0 0 0 2px var(--app-bg);
+}
+.sales-count[data-zero="1"] { background: #596579; }
+.login { position: relative; }
+.login-sales { position: absolute; top: 14px; right: 16px; }.sales-pop[hidden] { display: none !important; }
+.sales-pop { position: fixed; inset: 0; z-index: 50; }
+.sales-pop-backdrop { position: absolute; inset: 0; background: rgba(0, 0, 0, .35); }
+.sales-pop-card {
+  position: absolute; left: 10px; right: 10px; top: var(--pop-top, 70px);
+  height: min(680px, calc(100vh - var(--pop-top, 70px) - 10px));
+  border-radius: 14px; background: #101529; box-shadow: 0 18px 50px rgba(0, 0, 0, .55), 0 0 0 1px rgba(136, 239, 186, .18);
+  animation: sales-pop-in .14s ease-out;
+}
+.sales-pop-arrow {
+  position: absolute; top: -7px; right: var(--pop-arrow, 60px); width: 14px; height: 14px;
+  background: #101529; transform: rotate(45deg); border-radius: 2px;
+}
+.sales-pop-card iframe { position: relative; display: block; width: 100%; height: 100%; border: 0; border-radius: 14px; background: #101529; }
+@keyframes sales-pop-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .sales-pop-card { animation: none; } }

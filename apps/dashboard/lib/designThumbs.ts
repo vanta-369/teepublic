@@ -50,6 +50,22 @@ export interface DesignThumbIndex {
   revoke(): void;
 }
 
+/**
+ * The local index, falling back to TeePublic's own picture by design id.
+ * `remote` comes from the extension (bridge.fetchDesignImages), which reads
+ * each design's public page - that's how a design id gets a picture after all,
+ * without a guessed URL and without any Higgstee server. Local artwork wins.
+ */
+export function withRemoteImages(local: DesignThumbIndex, remote: Record<string, string>): DesignThumbIndex {
+  return {
+    get: (designId, title) => local.get(designId, title) ?? (designId ? remote[designId] || undefined : undefined),
+    get size() {
+      return local.size + Object.values(remote).filter(Boolean).length;
+    },
+    revoke: () => local.revoke(),
+  };
+}
+
 /** Resolves nothing — the initial state, and what a failed load returns. */
 export const EMPTY_THUMB_INDEX: DesignThumbIndex = {
   get: () => undefined,

@@ -13,7 +13,7 @@
 // learns that the account published one more thing, and nothing else.
 
 import type { QueueBatch, QueueItem, QueueItemStatus } from "@teepublic/shared";
-import { countSuccessfulUpload, resetCountedItems } from "../lib/uploadCounter";
+import { countFailedUpload, countSuccessfulUpload, resetCountedItems } from "../lib/uploadCounter";
 import { makeThumbnail } from "../lib/thumbnail";
 import {
   OriginalsDb,
@@ -90,7 +90,11 @@ export const QueueStore = {
       // not wait on (or be broken by) a network round-trip.
       // countSuccessfulUpload never rejects, and it sends only "+1" - no
       // design id, title or listing URL leaves the machine.
-      void countSuccessfulUpload({ itemId });
+      void countSuccessfulUpload({ itemId, projectId: batch?.projectId });
+    }
+    if (status === "failed" && before?.status !== "failed") {
+      // Same rules: not awaited, never rejects, sends only the project id.
+      void countFailedUpload({ itemId, projectId: batch?.projectId });
     }
 
     return batch;

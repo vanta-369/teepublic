@@ -182,3 +182,80 @@ export const BULK = {
     'a:contains("PUBLISH ALL")',
   ],
 } as const;
+
+// The owner's view of a TeePublic store (/user/<name>, /stores/<name>): every
+// design card carries a menu with Edit / Copy Settings / Deactivate / Delete.
+// Unverified against the live page when written; fix breakage HERE only.
+export const STORE = {
+  // Searched INSIDE design cards only: any match means it's the owner's view.
+  // Page-wide markers ("Edit Store", account-menu links) are NOT used - the
+  // signed-in seller's header menu carries them on every store, which put the
+  // delete bar on other people's stores. The "N Sold" badge on each card (see
+  // ownerSoldBadge) is the primary signal; these are fallbacks.
+  ownerMarkers: [
+    'a[href*="/designs/"][href*="/edit"]',
+    'a:contains("Copy Settings")',
+    'a:contains("Deactivate")',
+  ],
+  /** Own text of the per-card sales badge only the owner sees ("0 Sold", "12 Sold"). */
+  ownerSoldBadge: /^\d[\d,]*\s+sold$/i,
+  /** Upload time (unix seconds) in a design image URL. Live format (checked
+   *  2026-11): images.teepublic.com/derived/production/designs/<id>_<n>/<stamp>/…;
+   *  the second alternative is the older Cloudinary …/v<stamp>/… form. */
+  imageUploadStamp: /\/designs\/\d+_\d+\/(1\d{9})\/|\/v(1\d{9})\//,
+  // The menu item itself, searched inside one card.
+  deleteItem: [
+    'a[data-method="delete"]',
+    'a:contains("Delete")',
+    'button:contains("Delete")',
+    'li:contains("Delete")',
+    'div:contains("Delete")',
+  ],
+  // What opens a card's menu when the Delete item isn't in the DOM until then.
+  menuTrigger: [
+    '[class*="menu" i][role="button"]',
+    'button[class*="menu" i]',
+    'button[class*="option" i]',
+    'button[class*="more" i]',
+    '[class*="dots" i]',
+    '[class*="kebab" i]',
+    '[class*="dropdown" i] > button',
+    '[data-toggle="dropdown"]',
+  ],
+  // A TeePublic confirmation modal (a native confirm() is accepted separately).
+  confirmDialog: [
+    '[role="dialog"]',
+    '[role="alertdialog"]',
+    '.modal.show',
+    '.modal.in',
+    '.swal2-popup',
+    '[class*="modal" i]',
+  ],
+  confirmButton: [
+    'button:contains("Delete")',
+    'a:contains("Delete")',
+    'button:contains("Yes")',
+    'button:contains("Confirm")',
+    'button:contains("OK")',
+  ],
+} as const;
+
+// ---------------------------------------------------------------------------
+// A public design page (/t-shirt/<id>-slug), read by the listing exporter
+// (content/listingExport.ts). Checked against the live page 2026-11.
+export const LISTING = {
+  /** <h1 title="<Title> - <Main Tag> - <Product>">; its text is "<Title> <Product>". */
+  heading: ["h1[title]", "h1"],
+  /** In the page's dataLayer script. */
+  primaryTagJs: /"design_+primary_tag"\s*:\s*"((?:[^"\\]|\\.)*)"/,
+  primaryTagHeading: [".m-design-details__primary-tag"],
+  /** Every artist-applied tag pill, main tag included (usually first). */
+  tagLinks: ['a[data-gtm-name="designersAppliedTags"]', "a.gtmDesignersAppliedTag"],
+  description: [
+    'p.m-design-details__description-text[data-utilities--read-more-target="content"]',
+    ".m-design-details__description p",
+  ],
+  ogTitle: 'meta[property="og:title"]',
+  ogDescription: 'meta[property="og:description"]',
+} as const;
+

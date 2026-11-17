@@ -2,33 +2,19 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { ExtensionStatus } from "@/components/ExtensionStatus";
-import {
-  getExtensionId,
-  setExtensionId,
-  isExtensionAvailable,
-  pingExtension,
-} from "@/lib/bridge";
+import { isExtensionAvailable, pingExtension } from "@/lib/bridge";
 import { EXTENSION_STORE_URL } from "@/lib/nav";
 
 export function ExtensionPanel() {
   const [chromePresent, setChromePresent] = useState(false);
-  const [extId, setExtId] = useState("");
   const [ok, setOk] = useState<boolean | null>(null);
-  const [showAdvanced, setShowAdvanced] = useState(false);
 
   useEffect(() => {
     setChromePresent(isExtensionAvailable());
-    setExtId(getExtensionId() ?? "");
   }, []);
 
-  function onChange(v: string) {
-    setExtId(v);
-    setExtensionId(v);
-    setOk(null);
-  }
   async function onPing() {
-    setOk(await pingExtension(extId || undefined));
+    setOk(await pingExtension());
   }
 
   return (
@@ -63,6 +49,15 @@ export function ExtensionPanel() {
           </button>
           <Link href="/download-extension" className="btn-ghost">Full install guide</Link>
         </div>
+        {ok === false && (
+          <p className="mt-3 text-sm text-zinc-500 dark:text-zinc-400">
+            Install Higgstee from the{" "}
+            <a href={EXTENSION_STORE_URL} target="_blank" rel="noreferrer" className="text-accent-500 hover:underline">
+              Chrome Web Store
+            </a>
+            , make sure it is enabled in chrome://extensions, then test again.
+          </p>
+        )}
       </div>
 
       {/* How to connect */}
@@ -81,31 +76,6 @@ export function ExtensionPanel() {
           <li>✓ Desktop Chrome and Chromium browsers (Edge, Brave)</li>
           <li>✗ Mobile is not supported — use desktop Chrome to run uploads</li>
         </ul>
-      </div>
-
-      {/* Advanced / support-only manual pairing */}
-      <div className="surface p-6">
-        <button
-          className="text-sm text-zinc-500 hover:text-accent-500"
-          onClick={() => setShowAdvanced((v) => !v)}
-        >
-          {showAdvanced ? "Hide" : "Advanced"}: manual connection (support only)
-        </button>
-        {showAdvanced && (
-          <div className="mt-4 space-y-2">
-            <p className="text-xs text-zinc-500">
-              Only needed for manually loaded builds. Paste the extension ID from
-              chrome://extensions, then test the connection.
-            </p>
-            <ExtensionStatus
-              chromePresent={chromePresent}
-              extensionId={extId}
-              onChange={onChange}
-              onPing={onPing}
-              ok={ok}
-            />
-          </div>
-        )}
       </div>
     </div>
   );
