@@ -5,7 +5,7 @@
 
 import type { QueueItem } from "@teepublic/shared";
 import { TP, BULK } from "../lib/selectors";
-import { BulkLogStore, BulkStateStore } from "../services/queueStore";
+import { BulkLogStore, BulkStateStore, SettingsStore } from "../services/queueStore";
 import {
   firstMatching,
   setFileInput,
@@ -179,6 +179,18 @@ async function runUpload(
     const m = item.metadata;
     log(`──── starting "${m.title}" ────`);
     log(`page url:     ${location.href}`);
+    // TeePublic sends quick_create to its bulk uploader (or to a bulk design's
+    // edit page, "Currently Editing Design X of Y") while this TeePublic account
+    // has an unfinished bulk upload. Filling that page would put this listing on
+    // someone else's leftover design - stop instead, before touching anything.
+    if (!skipUpload && (/\/designs\/bulk_uploader/.test(location.pathname) || readBulkDesignCounter())) {
+      const err = "TeePublic opened its bulk uploader instead of the upload page - this TeePublic account has an unfinished bulk upload. " +
+        "Open teepublic.com/designs/bulk_uploader, finish or cancel those designs, then press Start again.";
+      log(`✗ ${err}`);
+      // No ITEM_STATUS "failed": nothing was uploaded, so it must not count
+      // against the daily limit. The engine puts the design back and pauses.
+      return { ok: false, error: err };
+    }
     if (!location.pathname.includes("/design/quick_create")) {
       // Not a failure: TeePublic often redirects to /designs/<id>/edit. The
       // product enable/disable + (non-apparel) color logic keys off the DOM
@@ -197,6 +209,7 @@ async function runUpload(
     // Track every field we've already filled so the next lookup can't reuse it.
     const filled = new Set<Element>();
 
+    await stopIfPaused(skipPublish);
     // ── 1. Upload the design file (ONE attempt — TeePublic caps ~50/day, so we
     //       never re-dispatch and burn extra daily slots). ──────────────────
     if (!skipUpload) {
@@ -244,6 +257,7 @@ async function runUpload(
 
     // Field order matches the page: Title → Description → Main Tag → Supporting Tags.
 
+    await stopIfPaused(skipPublish);
     // ── 2. Design Title ─────────────────────────────────────────────────
     const titleInput = await findInput([...TP.titleInput], "Design Title", "text", filled) as HTMLInputElement;
     await typeAndVerify(titleInput, item.metadata.title, "title");
@@ -274,6 +288,7 @@ async function runUpload(
       }
     }
 
+    await stopIfPaused(skipPublish);
     // ── 5. Supporting Tags ─────────────────────────────────────────────
     // First the same flow as Description / Main Tag (CSS → label fallback).
     // If both miss, use elimination: the only unfilled visible textarea on
@@ -409,6 +424,7 @@ async function runUpload(
       log(`mature radio not selected — skipping: ${(e as Error).message}`);
     }
 
+    await stopIfPaused(skipPublish);
     // ── 6.5. Product table colors (per color.md). Artwork processing was
     //         already confirmed done BEFORE the listing was filled, so the
     //         table is present. DO NOT touch the Product Colors palette —
@@ -475,6 +491,7 @@ async function runUpload(
       log(`product-colors palette click failed — continuing: ${(e as Error).message}`);
     }
 
+    await stopIfPaused(skipPublish);
     // ── 7. Terms & Conditions checkbox (single flow only — bulk ticks it once
     //       at "Publish All", so per-design fills skip it). ──────────────────
     if (!skipPublish) {
@@ -521,6 +538,7 @@ async function runUpload(
       return { ok: true };
     }
 
+    await stopIfPaused(skipPublish);
     // ── 8. Publish — success is detected by URL change to /t-shirt/<id>-<slug>
     const beforeUrl = location.href;
     const publish = await findClickable([...TP.publishButton]);
@@ -565,10 +583,25 @@ async function runUpload(
       fireItemStatus(item.id, "succeeded", err.publishedUrl);
       return { ok: true, publishedUrl: err.publishedUrl };
     }
+    if (err instanceof PausedByUserError) {
+      // Not a failure: the engine puts the design back to pending, uncounted.
+      log(`⏸ ${err.message}`);
+      return { ok: false, error: err.message };
+    }
     const msg = err instanceof Error ? err.message : String(err);
     fireItemStatus(item.id, "failed", undefined, msg);
     return { ok: false, error: msg };
   }
+}
+
+/** Pressing Pause stops the design in progress at the next step, BEFORE it is
+ *  published - instead of finishing it first (which took up to a minute). */
+class PausedByUserError extends Error {
+  constructor() { super("Paused by you before publishing - this design will upload again when you press Start."); }
+}
+async function stopIfPaused(skipPublish: boolean): Promise<void> {
+  if (skipPublish) return; // bulk in-place flow: never abandon a half-filled bulk page
+  if ((await SettingsStore.get()).paused) throw new PausedByUserError();
 }
 
 // ─── BULK upload — TeePublic's real flow (one /edit page per design) ────────
@@ -604,8 +637,27 @@ async function runBulkDispatch(
     return { ok: false, error: "no designs passed TeePublic's size check", validIds: [] };
   }
 
+  // Guard 1: the bulk uploader must be EMPTY before we add anything. TeePublic
+  // keeps unfinished designs from earlier uploads in this TeePublic account's
+  // bulk list; Get Started would open them too, and they'd get our listings.
+  const leftovers = (n: number) =>
+    `TeePublic's bulk uploader already has ${n > 0 ? n + " " : ""}unfinished design(s) from an earlier upload in this TeePublic account. ` +
+    `Open teepublic.com/designs/bulk_uploader, finish or cancel them, then press Start again.`;
+  const failAll = (err: string) => {
+    log(`bulk aborted: ${err}`);
+    for (const v of valid) fireItemStatus(v.item.id, "failed", undefined, err);
+    return { ok: false, error: err, validIds: [] as string[] };
+  };
+  if (!/\/designs\/bulk_uploader\/?$/.test(location.pathname)) {
+    // TeePublic sent us straight to an edit page = a bulk run is still open.
+    return failAll(leftovers(0));
+  }
+
   try {
     const input = await firstMatching<HTMLInputElement>([...BULK.multiFileInput], 15_000);
+    await sleep(1_500); // let any existing tiles render before counting
+    const before = countBulkTiles();
+    if (before > 0) return failAll(leftovers(before));
     const files = valid.map((v, i) =>
       dataUrlToFile(v.dataUrl, v.item.metadata.filename || `design_${i + 1}.png`, v.item.imageMime || "image/png"));
     await setFileInputMultiple(input, files);
@@ -624,6 +676,9 @@ async function runBulkDispatch(
       for (const v of valid) fireItemStatus(v.item.id, "failed", undefined, err);
       return { ok: false, error: err, validIds: [] };
     }
+    // Guard 2: more tiles than we sent = old designs appeared in the list.
+    const after = countBulkTiles();
+    if (after > valid.length) return failAll(leftovers(after - valid.length));
     return { ok: true, validIds: valid.map((v) => v.item.id) };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -821,6 +876,17 @@ async function maybeDriveBulkEditPage(): Promise<void> {
   // Bind by TeePublic's own "Currently Editing Design X of Y" position (1-based),
   // falling back to the persisted index if the label can't be read.
   const pos = readBulkDesignCounter();
+  // Guard 3: TeePublic's "Design X of Y" must count exactly the designs we sent.
+  // A different total means its bulk list holds other designs, so position
+  // matching would put our listings on the wrong ones - stop, fill nothing.
+  if (pos && pos.total !== state.items.length) {
+    const err = `TeePublic is editing ${pos.total} designs but Higgstee sent ${state.items.length} - ` +
+      `the bulk uploader has other unfinished designs. Nothing was filled. Finish or cancel them on TeePublic, then press Start again.`;
+    log(`bulk: ${err}`);
+    await BulkStateStore.patch({ active: false });
+    for (const it of state.items.slice(state.index)) fireItemStatus(it.id, "failed", undefined, err);
+    return;
+  }
   const itemIndex = pos ? pos.current - 1 : state.index;
   if (itemIndex < 0 || itemIndex >= state.items.length) {
     await BulkStateStore.patch({ active: false });

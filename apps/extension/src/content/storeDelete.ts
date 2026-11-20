@@ -414,22 +414,42 @@ function isOwnerStorePage(): boolean {
 // Creation date on every card - read from the image URL already on the page
 // (TeePublic's Cloudinary URLs carry /v<unix seconds>/), so no extra requests.
 
-function uploadDate(card: HTMLElement): { date: Date; img: HTMLElement } | null {
-  for (const img of Array.from(card.querySelectorAll<HTMLElement>("img, source"))) {
-    const urls = [img.getAttribute("src"), img.getAttribute("srcset"), img.getAttribute("data-src"), img.getAttribute("data-srcset")];
-    for (const u of urls) {
-      const m = u?.match(STORE.imageUploadStamp);
-      if (m) return { date: new Date(Number(m[1] ?? m[2]) * 1000), img };
-    }
+/** Upload time carried in one element's image address(es), or null. Looks at
+ *  src / srcset / lazy-load data-* attributes, an inline background-image, and
+ *  the <source>s of a surrounding <picture>. */
+function stampOf(img: HTMLElement): Date | null {
+  const own = [img.getAttribute("src"), img.getAttribute("srcset"), img.getAttribute("data-src"),
+    img.getAttribute("data-srcset"), img.getAttribute("data-lazy"), img.getAttribute("style")];
+  const pic = img.parentElement?.tagName === "PICTURE"
+    ? Array.from(img.parentElement.querySelectorAll("source")).flatMap((s) => [s.getAttribute("srcset"), s.getAttribute("data-srcset")])
+    : [];
+  for (const u of [...own, ...pic]) {
+    const m = u?.match(STORE.imageUploadStamp);
+    if (m) return new Date(Number(m[1] ?? m[2]) * 1000);
   }
   return null;
+}
+
+function uploadDate(card: HTMLElement): { date: Date; img: HTMLElement } | null {
+  for (const img of Array.from(card.querySelectorAll<HTMLElement>("img, source"))) {
+    const date = stampOf(img);
+    if (date) return { date, img: img.tagName === "SOURCE" ? (img.parentElement?.querySelector("img") ?? img) : img };
+  }
+  return null;
+}
+
+/** An element's text, minus the badges TeePublic lays OVER the picture ("0 Sold",
+ *  "12 Sold" on the owner's own store). Counting those as text stopped the climb
+ *  inside the picture's frame, where the date was clipped out of sight. */
+function textBesidesBadges(e: Element): string {
+  return (e.textContent ?? "").replace(/\d[\d,]*\s*sold/gi, "").trim();
 }
 
 /** The design image's box: the highest ancestor of the <img> (inside the card)
  *  that holds no text - so the title and price stay below it. */
 function imageBox(img: HTMLElement, card: HTMLElement): HTMLElement {
   let box = img;
-  while (box.parentElement && box.parentElement !== card && !(box.parentElement.textContent ?? "").trim()) {
+  while (box.parentElement && box.parentElement !== card && !textBesidesBadges(box.parentElement)) {
     box = box.parentElement;
   }
   return box;
@@ -437,6 +457,34 @@ function imageBox(img: HTMLElement, card: HTMLElement): HTMLElement {
 
 function paintDates(): void {
   for (const card of findCards().values()) ensureDateRow(card);
+  // Every other dated design picture on the page - whatever store it is and
+  // however TeePublic built that card (the owner's own store view doesn't
+  // always match the card scan above). Read from the address alone.
+  for (const img of Array.from(document.querySelectorAll<HTMLElement>('img, [style*="background-image"]'))) {
+    if (img.dataset.higgsteeDated || img.closest(".higgstee-sd")) continue;
+    const r = img.getBoundingClientRect();
+    if (r.width < 100 || r.height < 100) continue; // a real design picture, not an icon
+    const date = stampOf(img);
+    if (!date) continue;
+    img.dataset.higgsteeDated = "1";
+    const box = pictureBox(img);
+    if (box.previousElementSibling?.classList.contains("higgstee-sd-date")) continue;
+    box.before(dateRow(date));
+  }
+}
+
+/** The picture's own wrapper: climb while the parent holds no text and is about
+ *  the picture's size, so the date sits above the picture, not above the page. */
+function pictureBox(img: HTMLElement): HTMLElement {
+  const w = img.getBoundingClientRect().width;
+  let box = img;
+  for (let i = 0; i < 6; i++) {
+    const p = box.parentElement;
+    if (!p || p === document.body || textBesidesBadges(p)) break;
+    if (p.getBoundingClientRect().width > w * 1.5) break;
+    box = p;
+  }
+  return box;
 }
 
 /** The card's date row, ABOVE the design picture - made now if it isn't there
@@ -446,7 +494,16 @@ function ensureDateRow(card: HTMLElement): HTMLElement | null {
   if (existing) return existing;
   const found = uploadDate(card);
   if (!found) return null;
-  const d = found.date;
+  found.img.dataset.higgsteeDated = "1";
+  const row = dateRow(found.date);
+  const box = imageBox(found.img, card);
+  if (box === card || !box.parentElement) card.prepend(row);
+  else box.before(row);
+  return row;
+}
+
+/** The lime-on-dark date pill, in a centred row. */
+function dateRow(d: Date): HTMLElement {
   // "2026/11/04 23:25:09 GMT", side-panel palette (lime on near-black), centred
   // just above the design so nothing covers the artwork.
   const p = (n: number) => String(n).padStart(2, "0");
@@ -461,9 +518,6 @@ function ensureDateRow(card: HTMLElement): HTMLElement | null {
     stamp);
   pill.title = `Created ${d.toLocaleString()} (your time)`;
   row.appendChild(pill);
-  const box = imageBox(found.img, card);
-  if (box === card || !box.parentElement) card.prepend(row);
-  else box.before(row);
   return row;
 }
 

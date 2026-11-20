@@ -566,8 +566,11 @@ function wireHandlers(): void {
   $("sel-invert").addEventListener("click", () => void invertPage());
 
   // Action bar
-  $("act-start").addEventListener("click", () => void start());
-  $("act-pause").addEventListener("click", () => void sendMsg({ type: "ENGINE_PAUSE" }));
+  // Instant feedback: the button changes the moment it's pressed, while the
+  // worker confirms access / stops the current design in the background.
+  $("act-start").addEventListener("click", () => void withBusy("act-start", "Starting…", start));
+  $("act-pause").addEventListener("click", () =>
+    void withBusy("act-pause", "Stopping…", async () => { await sendMsg({ type: "ENGINE_PAUSE" }); }));
   $("act-queue").addEventListener("click", () => chrome.tabs.create({ url: chrome.runtime.getURL("queue/index.html") }));
   $("act-clear").addEventListener("click", async () => {
     if (locked) return;
@@ -610,6 +613,25 @@ async function toggleTheme(): Promise<void> {
 }
 
 // Promise wrapper over chrome.runtime.sendMessage (ignores "no receiver").
+/** Disable a button and show `label` until `fn` settles (at least 600 ms, so
+ *  the change is visible even when the answer is instant). */
+async function withBusy(id: string, label: string, fn: () => Promise<void>): Promise<void> {
+  const btn = document.getElementById(id) as HTMLButtonElement | null;
+  if (!btn || btn.dataset.busy) return;
+  const html = btn.innerHTML;
+  btn.dataset.busy = "1";
+  btn.disabled = true;
+  btn.textContent = label;
+  const minShow = new Promise((r) => setTimeout(r, 600));
+  try { await fn(); } finally {
+    await minShow;
+    btn.innerHTML = html;
+    delete btn.dataset.busy;
+    btn.disabled = false;
+    void renderQueue(); // re-applies the real enabled/disabled state (local, no network)
+  }
+}
+
 function sendMsg(message: unknown): Promise<{ ok?: boolean; error?: string; status?: string } | undefined> {
   return new Promise((resolve) => {
     try {

@@ -18,7 +18,7 @@ import { applyBasicColor } from "@/lib/colorPresets";
 import { enforceAdultRule } from "@/lib/productGroups";
 import { ColorRun } from "./ColorRun";
 import { ProjectPicker } from "./ProjectPicker";
-import { clearChosenProjectId, createProject, getChosenProjectId, listProjects, setChosenProjectId, type Project } from "@/lib/projects";
+import { clearChosenProjectId, createProject, deleteProject, getChosenProjectId, renameProject, listProjects, setChosenProjectId, type Project } from "@/lib/projects";
 import {
   loadSpreadsheet,
   saveSpreadsheet,
@@ -340,6 +340,15 @@ export function UploaderApp() {
     return () => { cancelled = true; };
   }, []);
   const chooseProject = (id: string) => { setChosenProject(id); void setChosenProjectId(id); };
+  const renameChosen = async (id: string, name: string) => {
+    await renameProject(id, name);
+    setProjects((list) => list?.map((p) => (p.id === id ? { ...p, name: name.trim() } : p)) ?? list);
+  };
+  const deleteChosen = async (id: string) => {
+    await deleteProject(id);
+    setProjects((list) => list?.filter((p) => p.id !== id) ?? list);
+    if (chosenProject === id) setChosenProject(null);
+  };
   const chosenName = projects?.find((p) => p.id === chosenProject)?.name ?? null;
   const projectChip = chosenName && (
     <span className="rounded-full bg-accent-500/15 px-3 py-1 text-xs font-semibold text-accent-600 dark:text-accent-400" title="Project">
@@ -396,7 +405,35 @@ export function UploaderApp() {
         </button>
       </div>
 
-      {mode === "generate" && <GenerationApp sessionId={sessionId} />}
+      {mode === "generate" && (
+        <div className="space-y-6">
+          {/* Same project choice as the spreadsheet flow: the batch carries it. */}
+          {!chosenProject ? (
+            <ProjectPicker
+              projects={projects}
+              chosenId={chosenProject}
+              error={projectsError}
+              onChoose={chooseProject}
+              onCreate={async (name) => {
+                const created = await createProject(name);
+                setProjects((list) => [...(list ?? []), created]);
+                chooseProject(created.id);
+              }}
+              onRename={renameChosen}
+              onDelete={deleteChosen}
+            />
+          ) : (
+            <div className="flex items-center gap-3">
+              {projectChip}
+              <button type="button" className="text-sm text-zinc-500 hover:text-accent-500"
+                onClick={() => { setChosenProject(null); void clearChosenProjectId(); }}>
+                Change project
+              </button>
+            </div>
+          )}
+          <GenerationApp sessionId={sessionId} projectId={chosenProject} projectName={chosenName} />
+        </div>
+      )}
 
       {mode === "spreadsheet" && (
       <div className="cp-soft space-y-6">
@@ -411,6 +448,8 @@ export function UploaderApp() {
               setProjects((list) => [...(list ?? []), created]);
               chooseProject(created.id);
             }}
+            onRename={renameChosen}
+            onDelete={deleteChosen}
           />
         )}
         {phase === "upload" && (

@@ -13,7 +13,7 @@ import type { Project } from "@/lib/projects";
 import { fetchQuotas, setQuotaLimit, setQuotaUsed } from "@/lib/bridge";
 
 export function ProjectPicker({
-  projects, chosenId, error, onChoose, onCreate,
+  projects, chosenId, error, onChoose, onCreate, onRename, onDelete,
 }: {
   projects: Project[] | null;
   chosenId: string | null;
@@ -21,11 +21,33 @@ export function ProjectPicker({
   error: string | null;
   onChoose: (id: string) => void;
   onCreate: (name: string) => Promise<void>;
+  onRename: (id: string, name: string) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
 }) {
+
   const [adding, setAdding] = useState(false);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [editing, setEditing] = useState<{ id: string; name: string } | null>(null);
+  const [rowError, setRowError] = useState<string | null>(null);
+
+  async function saveName(e: React.FormEvent) {
+    e.preventDefault();
+    if (!editing || !editing.name.trim() || busy) return;
+    setBusy(true);
+    setRowError(null);
+    try { await onRename(editing.id, editing.name); setEditing(null); }
+    catch (err) { setRowError(err instanceof Error ? err.message : "Could not rename the project."); }
+    finally { setBusy(false); }
+  }
+
+  async function remove(p: Project) {
+    if (!window.confirm(`Delete the project "${p.name}"? Its upload count (${p.uploadCount}) is removed. Your designs are not affected.`)) return;
+    setRowError(null);
+    try { await onDelete(p.id); }
+    catch (err) { setRowError(err instanceof Error ? err.message : "Could not delete the project."); }
+  }
 
   // Quotas live in the extension; refresh every 30s so a running upload shows.
   const [quotas, setQuotas] = useState<Record<string, UploadQuota> | null>(null);
@@ -72,6 +94,19 @@ export function ProjectPicker({
         {projects === null && <span className="text-sm text-zinc-500">Loading projects…</span>}
         {projects?.map((p) => (
           <div key={p.id} className="flex w-56 flex-col gap-2">
+            {editing?.id === p.id ? (
+              <form onSubmit={saveName} className="flex items-center gap-1.5">
+                <input
+                  autoFocus
+                  value={editing.name}
+                  maxLength={40}
+                  onChange={(e) => setEditing({ id: p.id, name: e.target.value })}
+                  onKeyDown={(e) => { if (e.key === "Escape") setEditing(null); }}
+                  className="min-w-0 flex-1 rounded-full bg-ink-800 px-3 py-2 text-sm text-zinc-900 outline-none focus:ring-2 focus:ring-accent-500/50 dark:text-zinc-100"
+                />
+                <button type="submit" className="cp-pill cp-pill-primary !py-2" disabled={!editing.name.trim() || busy}>Save</button>
+              </form>
+            ) : (
             <button
               type="button"
               onClick={() => onChoose(p.id)}
@@ -85,6 +120,13 @@ export function ProjectPicker({
             >
               {p.name}
             </button>
+            )}
+            {editing?.id !== p.id && (
+              <div className="flex justify-center gap-3 text-[11px] font-semibold">
+                <button type="button" className="text-zinc-500 hover:text-accent-500" onClick={() => { setEditing({ id: p.id, name: p.name }); setRowError(null); }}>Rename</button>
+                <button type="button" className="text-zinc-500 hover:text-red-400" onClick={() => void remove(p)}>Delete</button>
+              </div>
+            )}
             <QuotaCounter
               quota={quotas?.[p.id] ?? null}
               problem={quotaError}
@@ -114,6 +156,7 @@ export function ProjectPicker({
         )}
       </div>
       {createError && <p className="cp-error mt-2">{createError}</p>}
+      {rowError && <p className="cp-error mt-2">{rowError}</p>}
       {projects !== null && projects.length > 0 && !chosenId && (
         <p className="mt-2 text-sm text-zinc-500">Choose a project to start uploading designs.</p>
       )}
@@ -216,7 +259,7 @@ function quotaProblem(message: string): string {
     return "The extension in this Chrome is an older version without the counter. Reload it in chrome://extensions (or update it), then Retry.";
   }
   if (/not installed|not configured/i.test(message)) {
-    return "The extension isn't reachable. Install it, or paste your unpacked extension's ID on the Extension page (Advanced), then Retry.";
+    return "The extension isn't reachable. Install Higgstee from the Chrome Web Store and make sure it's enabled, then Retry.";
   }
   return `Counter unavailable: ${message}`;
 }

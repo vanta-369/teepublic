@@ -84,7 +84,12 @@ function defaultDesignConfig(): ColorProductConfigValue {
   };
 }
 
-export function GenerationApp({ sessionId }: { sessionId: string }) {
+export function GenerationApp({ sessionId, projectId, projectName }: {
+  sessionId: string;
+  /** The project (TeePublic account) the batch is for - same picker as the spreadsheet flow. */
+  projectId: string | null;
+  projectName: string | null;
+}) {
   const [apiKey, setKey]   = useState("");
   const [keyDraft, setKeyDraft] = useState("");
   const [showKey, setShowKey]   = useState(false);
@@ -476,7 +481,7 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
   async function sendToQueue() {
     setError(null);
     const extId = getExtensionId();
-    if (!extId) { setError("Set the extension ID in the panel above first."); return; }
+    if (!projectId) { setError("Choose a project first (top of the page) - it's the TeePublic account these designs go to."); return; }
     if (readyCount === 0) { setError("Generate at least one listing first."); return; }
     setStage("sending");
     try {
@@ -521,6 +526,8 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
           rowCount: items.length,
           matchedCount: items.length,
         },
+        // Credits the project's upload count and daily slots, like the spreadsheet flow.
+        projectId,
       };
 
       // Chunked send so large local images do not exceed Chrome's 64 MiB
@@ -756,7 +763,9 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
             <span className="text-zinc-500 dark:text-zinc-400 text-base"> / {designs.length} designs</span>
           </div>
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
-            Each design ships with its own colors &amp; products configuration.
+            {projectName
+              ? <>Project: <span className="font-semibold text-accent-600 dark:text-accent-400">{projectName}</span> · each design ships with its own colors &amp; products.</>
+              : "Choose a project at the top of the page before sending."}
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -771,7 +780,7 @@ export function GenerationApp({ sessionId }: { sessionId: string }) {
           <button
             type="button"
             className="btn-primary text-base px-6 py-3"
-            disabled={readyCount === 0 || stage === "sending"}
+            disabled={readyCount === 0 || stage === "sending" || !projectId}
             onClick={sendToQueue}
           >
             {stage === "sending" ? "Sending…" : stage === "sent" ? "Sent ✓" : `Send to extension (${readyCount})`}

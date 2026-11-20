@@ -23,8 +23,26 @@ class AutomationEngine {
 
   getState(): EngineState { return this.state; }
 
-  async start() {
+  /** Set by start() when the caller has JUST passed the live access check, so
+   *  the loop's first pass doesn't repeat the same two network round-trips.
+   *  Every later pass checks live as before. */
+  private skipNextAccessCheckUntil = 0;
+  /** Bumped by every start(): a loop whose id is stale exits, so Pause then
+   *  Start during the between-designs wait can never leave two loops running. */
+  private runId = 0;
+  /** The design currently being uploaded, so a new Start waits for it to stop. */
+  private inFlight: Promise<void> | null = null;
+
+  async start(opts: { accessJustConfirmed?: boolean } = {}) {
     if (this.state === "running") return;
+    const calledAt = Date.now();
+    // A design from before Pause may still be stopping (it aborts at its next
+    // step while paused is still set). Let it finish first: two uploads must
+    // never share the TeePublic tab.
+    if (this.inFlight) await this.inFlight.catch(() => {});
+    if (this.getState() === "running") return; // another Start won while we waited
+    // The skip window counts from when the caller's check passed, not after the wait.
+    if (opts.accessJustConfirmed) this.skipNextAccessCheckUntil = calledAt + 5_000;
     // NOTE: access is enforced authoritatively at the top of each loop() pass
     // (below) and at the message boundary in background/index.ts. No item can
     // run before that live check passes.
@@ -37,7 +55,7 @@ class AutomationEngine {
     await requeueSelectedFailed();
     this.state = "running";
     this.runStartedAt = Date.now();
-    void this.loop();
+    void this.loop(++this.runId);
   }
 
   /** True when TeePublic showed its daily-limit banner during this run (or the
@@ -104,11 +122,13 @@ class AutomationEngine {
     }
   }
 
-  private async loop() {
-    while (true) {
+  private async loop(myRun: number) {
+    while (myRun === this.runId) {
       // Re-check on EVERY item — a trial can expire or an admin can suspend
       // mid-run, and we must catch it at the next boundary, not from a cache.
-      if (!(await this.ensureAccess())) return;
+      const fresh = Date.now() < this.skipNextAccessCheckUntil;
+      this.skipNextAccessCheckUntil = 0;
+      if (!fresh && !(await this.ensureAccess())) return;
 
       const settings = await SettingsStore.get();
       if (settings.paused) { this.state = "paused"; return; }
@@ -145,8 +165,10 @@ class AutomationEngine {
       ).length;
       BulkLogStore.append(`── ${total - remaining + 1}/${total}: ${next.metadata.filename} (${next.metadata.title}) ──`);
 
-      await this.runOne(next);
+      this.inFlight = this.runOne(next);
+      try { await this.inFlight; } finally { this.inFlight = null; }
       await humanDelay(settings.betweenItemsMinMs, settings.betweenItemsMaxMs);
+      if (myRun !== this.runId) return; // a newer Start took over
     }
   }
 
@@ -334,6 +356,24 @@ class AutomationEngine {
           attempts: item.attempts + 1,
         });
         console.warn(`[teepublic] item ${item.id} has no local artwork — ${err.message}`);
+        return;
+      }
+      // Two definite answers from the page itself - nothing was published, so
+      // no need to wait for a late success signal:
+      const early = err instanceof Error ? err.message : String(err);
+      if (/^Paused by you/.test(early)) {
+        // The user pressed Pause mid-design: back to pending, not counted.
+        await QueueStore.setItemStatus(item.id, "pending", { lastError: undefined, attempts: item.attempts });
+        console.info(`[teepublic] item ${item.id} stopped by Pause before publishing`);
+        return;
+      }
+      if (/unfinished bulk upload/.test(early)) {
+        // TeePublic redirected to its bulk uploader: nothing was uploaded. Keep
+        // the design pending (not a failure, not counted) and pause the run -
+        // every next design would hit the same page.
+        await QueueStore.setItemStatus(item.id, "pending", { lastError: early, attempts: item.attempts });
+        await this.pause();
+        console.info(`[teepublic] paused - TeePublic has an unfinished bulk upload`);
         return;
       }
       // The content script's ITEM_STATUS / PUBLISHED_URL_DETECTED may already

@@ -176,7 +176,7 @@ chrome.runtime.onMessageExternal.addListener((message: DashboardToExtensionMessa
         case "QUEUE_START": {
           const g = await guardAccess();
           if (!g.ok) return sendResponse(g);
-          await engine.start();
+          await engine.start({ accessJustConfirmed: true });
           return sendResponse({ ok: true });
         }
 
@@ -322,7 +322,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case "ENGINE_START": {
         const g = await guardAccess();
         if (!g.ok) return sendResponse(g);
-        await engine.start();
+        await engine.start({ accessJustConfirmed: true });
         return sendResponse({ ok: true });
       }
       case "ENGINE_PAUSE":          await engine.pause(); return sendResponse({ ok: true });
